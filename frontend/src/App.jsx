@@ -1,292 +1,146 @@
-
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { API_CONFIG, healthCheck } from "./services/api";
+import {
+  API_CONFIG,
+  healthCheck,
+  createVideoJob,
+  getJobStatus,
+  downloadProcessedVideo,
+  downloadCSVReport,
+  downloadJSONReport,
+} from "./services/api";
+import ProcessingStatus from "./components/ProcessingStatus";
 import "./style.css";
 
-const API_BASE_URL = API_CONFIG.BASE_URL;
-const JOBS_URL = `${API_BASE_URL}/api/jobs`;
-
-async function readResponse(response) {
-  const contentType = response.headers.get("content-type") || "";
-  const data = contentType.includes("application/json")
-    ? await response.json()
-    : await response.text();
-
-  if (!response.ok) {
-    const message =
-      typeof data === "string"
-        ? data
-        : data?.detail?.message ||
-          data?.detail ||
-          data?.message ||
-          `HTTP ${response.status}`;
-
-    throw new Error(message);
-  }
-
-  return data;
-}
-
-function formatSeconds(value) {
-  if (
-    value === null ||
-    value === undefined ||
-    !Number.isFinite(Number(value))
-  ) {
-    return "—";
-  }
-
-  const seconds = Math.max(0, Math.round(Number(value)));
-
-  if (seconds < 60) return `${seconds}s`;
-
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-}
-
-function formatTimestamp(value) {
-  if (
-    value === null ||
-    value === undefined ||
-    !Number.isFinite(Number(value))
-  ) {
-    return "—";
-  }
-
-  return `${Number(value).toFixed(2)}s`;
-}
-
-function Metric({ label, value, helper }) {
-  return (
-    <div className="pa-metric-card">
-      <div className="pa-metric-value">{value ?? "—"}</div>
-      <div className="pa-metric-label">{label}</div>
-      {helper ? (
-        <div className="pa-metric-helper">{helper}</div>
-      ) : null}
-    </div>
-  );
-}
+const formatBytes = (bytes) => {
+  if (!Number.isFinite(Number(bytes))) return "—";
+  const value = Number(bytes);
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+};
 
 export default function App() {
   const [backend, setBackend] = useState({
     checking: true,
     connected: false,
     model_loaded: false,
+    message: "Checking backend connection…",
   });
-
   const [file, setFile] = useState(null);
   const [confidence, setConfidence] = useState(0.35);
   const [frameInterval, setFrameInterval] = useState(1);
-
   const [job, setJob] = useState(null);
   const [result, setResult] = useState(null);
-  const [error, setError] = useState("");
-
   const [submitting, setSubmitting] = useState(false);
   const [isPolling, setIsPolling] = useState(false);
-
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const pollTimer = useRef(null);
   const activeJobId = useRef(null);
-  const mounted = useRef(true);
-
-  // --------------------------------------------------
-  // Backend health check
-  // --------------------------------------------------
+  const mounted = useRef(false);
+  const consecutivePollErrors = useRef(0);
 
   const refreshBackend = useCallback(async () => {
-    setBackend((current) => ({
-      ...current,
-      checking: true,
-    }));
+    setBackend((old) => ({ ...old, checking: true }));
+    const status = await healthCheck();
+    if (mounted.current) setBackend({ ...status, checking: false });
+    return status;
+  }, []);
 
-    try {
-      const status = await healthCheck();
-
-      if (mounted.current) {
-        setBackend({
-          ...status,
-          checking: false,
-        });
-      }
-    } catch (healthError) {
+  useEffect(() => {
+    mounted.current = true;
+    refreshBackend().catch((err) => {
       if (mounted.current) {
         setBackend({
           checking: false,
           connected: false,
           model_loaded: false,
-          error: healthError.message,
+          message: err.message,
         });
       }
-    }
-  }, []);
-
-  useEffect(() => {
-    mounted.current = true;
-
-    refreshBackend();
-
+    });
     return () => {
       mounted.current = false;
-
-      if (pollTimer.current) {
-        clearTimeout(pollTimer.current);
-      }
+      if (pollTimer.current) window.clearTimeout(pollTimer.current);
     };
   }, [refreshBackend]);
 
-  // --------------------------------------------------
-  // Fetch job status
-  // --------------------------------------------------
+  const pollJob = useCallback(async (jobId) => {
+    if (!mounted.current || activeJobId.current !== jobId) return;
+    setIsPolling(true);
 
-  const fetchJobStatus = useCallback(async (jobId) => {
-    const response = await fetch(
-      `${JOBS_URL}/${encodeURIComponent(jobId)}`,
-      {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-        },
-        cache: "no-store",
-      }
-    );
+    try {
+      const status = await getJobStatus(jobId);
+      if (!mounted.current || activeJobId.current !== jobId) return;
+      consecutivePollErrors.current = 0;
+      setJob(status);
+      setError("");
 
-    return readResponse(response);
-  }, []);
-
-  // --------------------------------------------------
-  // Poll backend for live frame updates
-  // --------------------------------------------------
-
-  const pollJob = useCallback(
-    async (jobId) => {
-      if (
-        !mounted.current ||
-        activeJobId.current !== jobId
-      ) {
+      if (status.status === "completed") {
+        setResult(status.result || null);
+        setIsPolling(false);
+        activeJobId.current = null;
+        setNotice("Video processing completed successfully.");
         return;
       }
 
-      setIsPolling(true);
-
-      try {
-        const data = await fetchJobStatus(jobId);
-
-        if (
-          !mounted.current ||
-          activeJobId.current !== jobId
-        ) {
-          return;
-        }
-
-        // Update live progress and frame results.
-        setJob(data);
-
-        // Job completed.
-        if (data.status === "completed") {
-          setResult(data.result || null);
-          setIsPolling(false);
-          activeJobId.current = null;
-          setError("");
-          return;
-        }
-
-        // Job failed.
-        if (
-          data.status === "failed" ||
-          data.status === "cancelled"
-        ) {
-          setError(
-            data.error ||
-              data.message ||
-              "Video processing failed."
-          );
-
-          setIsPolling(false);
-          activeJobId.current = null;
-          return;
-        }
-
-        // Continue polling.
-        pollTimer.current = setTimeout(
-          () => pollJob(jobId),
-          3000
-        );
-      } catch (pollError) {
-        if (
-          !mounted.current ||
-          activeJobId.current !== jobId
-        ) {
-          return;
-        }
-
-        // A temporary polling failure does not mean
-        // the background video-processing job failed.
-        setError(
-          `Unable to retrieve the latest job status: ${pollError.message}. Retrying...`
-        );
-
-        pollTimer.current = setTimeout(
-          () => pollJob(jobId),
-          5000
-        );
+      if (status.status === "failed" || status.status === "cancelled") {
+        setError(status.error || status.message || `Job ${status.status}.`);
+        setIsPolling(false);
+        activeJobId.current = null;
+        return;
       }
-    },
-    [fetchJobStatus]
-  );
 
-  // --------------------------------------------------
-  // Upload video and start processing
-  // --------------------------------------------------
+      pollTimer.current = window.setTimeout(() => pollJob(jobId), API_CONFIG.POLL_INTERVAL_MS);
+    } catch (pollError) {
+      if (!mounted.current || activeJobId.current !== jobId) return;
+      consecutivePollErrors.current += 1;
+      console.error("Job polling error:", pollError);
 
-  const startProcessing = async (event) => {
+      // A temporary status request failure is not proof that the processing job failed.
+      if (consecutivePollErrors.current >= 12) {
+        setError(
+          `Unable to retrieve job status after several attempts. The backend job may still be running. Job ID: ${jobId}. Check Render before uploading the same video again.`
+        );
+        setIsPolling(false);
+        activeJobId.current = null;
+        return;
+      }
+
+      setNotice(`Connection interrupted. Retrying status check (${consecutivePollErrors.current}/12)…`);
+      pollTimer.current = window.setTimeout(() => pollJob(jobId), 5000);
+    }
+  }, []);
+
+  const handleFileChange = (event) => {
+    const selected = event.target.files?.[0] || null;
+    setFile(selected);
+    setError("");
+    setNotice("");
+  };
+
+  const handleSubmit = async (event) => {
     event.preventDefault();
+    setError("");
+    setNotice("");
 
     if (!file) {
-      setError("Please select a video file first.");
+      setError("Please select a video file.");
       return;
     }
 
-    if (pollTimer.current) {
-      clearTimeout(pollTimer.current);
-    }
-
+    if (pollTimer.current) window.clearTimeout(pollTimer.current);
     activeJobId.current = null;
-
     setSubmitting(true);
     setIsPolling(false);
-    setError("");
     setJob(null);
     setResult(null);
+    consecutivePollErrors.current = 0;
 
     try {
-      const formData = new FormData();
+      const created = await createVideoJob(file, confidence, frameInterval);
+      if (!mounted.current) return;
 
-      formData.append("file", file);
-      formData.append(
-        "confidence",
-        String(confidence)
-      );
-      formData.append(
-        "frame_interval",
-        String(frameInterval)
-      );
-
-      const response = await fetch(JOBS_URL, {
-        method: "POST",
-        body: formData,
-      });
-
-      const created = await readResponse(response);
-
-      if (!created.job_id) {
-        throw new Error(
-          "Backend did not return a job ID."
-        );
-      }
-
-      activeJobId.current = created.job_id;
-
-      setJob({
+      const initialJob = {
         ...created,
         status: created.status || "queued",
         latest_frame: null,
@@ -294,609 +148,220 @@ export default function App() {
         current_people: 0,
         current_objects: 0,
         unique_people_so_far: 0,
-      });
-
+      };
+      setJob(initialJob);
+      activeJobId.current = created.job_id;
+      setNotice(`Job created: ${created.job_id}`);
       setSubmitting(false);
-
-      // Start live progress polling.
       pollJob(created.job_id);
     } catch (submitError) {
-      setError(
-        submitError.message ||
-          "Unable to upload the video."
-      );
-
+      setError(submitError.message || "Unable to upload the video.");
       setSubmitting(false);
     }
   };
 
-  // --------------------------------------------------
-  // Stop browser polling
-  // --------------------------------------------------
-
-  const stopLocalPolling = () => {
-    if (pollTimer.current) {
-      clearTimeout(pollTimer.current);
-    }
-
+  const stopPolling = () => {
+    if (pollTimer.current) window.clearTimeout(pollTimer.current);
     activeJobId.current = null;
-
     setIsPolling(false);
-
-    setError(
-      "Progress checking stopped in this browser. The backend job may still be running."
-    );
+    setNotice("Browser status polling stopped. The backend job may continue processing.");
   };
 
-  // --------------------------------------------------
-  // Live job data
-  // --------------------------------------------------
+  const active = ["queued", "processing"].includes(job?.status);
+  const completed = result || (job?.status === "completed" ? job.result : null);
 
-  const latest = job?.latest_frame || null;
-
-  const activity = Array.isArray(job?.recent_activity)
-    ? [...job.recent_activity].reverse()
-    : [];
-
-  const progress = Math.max(
-    0,
-    Math.min(100, Number(job?.progress || 0))
-  );
-
-  const isActive = [
-    "queued",
-    "processing",
-  ].includes(job?.status);
-
-  const completedResult =
-    result || job?.result || null;
-
-  // --------------------------------------------------
-  // Output URL helper
-  // --------------------------------------------------
-
-  const outputUrl = (url) => {
-    if (!url) return "#";
-
-    if (/^https?:\/\//i.test(url)) {
-      return url;
+  const handleDownload = async (kind) => {
+    try {
+      if (kind === "video") await downloadProcessedVideo(completed?.video_url);
+      if (kind === "csv") await downloadCSVReport(completed?.csv_url);
+      if (kind === "json") await downloadJSONReport(completed?.json_url);
+    } catch (downloadError) {
+      setError(downloadError.message || "Unable to download the output file.");
     }
-
-    return `${API_BASE_URL}${
-      url.startsWith("/") ? "" : "/"
-    }${url}`;
   };
-
-  // --------------------------------------------------
-  // Main application UI
-  // --------------------------------------------------
 
   return (
     <main className="pa-app">
-
-      {/* HEADER */}
-
       <header className="pa-header">
-        <div>
-          <div className="pa-eyebrow">
-            PRAGYANAI · COMPUTER VISION
+        <div className="pa-brand">
+          <div className="pa-brand-mark">P</div>
+          <div>
+            <div className="pa-eyebrow">PRAGYANAI · COMPUTER VISION</div>
+            <h1>People Detection &amp; Counting</h1>
+            <p>YOLO11 TFLite · ByteTrack · OpenCV</p>
           </div>
-
-          <h1>
-            People Detection &amp; Counting
-          </h1>
-
-          <p>
-            YOLO11 TFLite · ByteTrack · TensorFlow Lite
-          </p>
         </div>
 
-        <div
-          className={`pa-connection ${
-            backend.connected
-              ? "is-online"
-              : "is-offline"
-          }`}
-        >
+        <div className={`pa-connection ${backend.connected ? "is-online" : "is-offline"}`}>
           <span className="pa-status-dot" />
-
-          {backend.checking
-            ? "Checking backend"
-            : backend.connected
-            ? "Backend connected"
-            : "Backend disconnected"}
-
+          <span>
+            {backend.checking
+              ? "Checking backend"
+              : backend.connected
+                ? backend.model_loaded
+                  ? "Backend & model ready"
+                  : "Backend connected · Model not ready"
+                : "Backend disconnected"}
+          </span>
           <button
             type="button"
             className="pa-small-button"
-            onClick={refreshBackend}
+            onClick={() => refreshBackend().catch((err) => setError(err.message))}
+            disabled={backend.checking}
           >
             Refresh
           </button>
         </div>
       </header>
 
-      {/* VIDEO UPLOAD */}
+      <section className="pa-panel pa-upload-panel">
+        <div className="pa-section-title">
+          <div>
+            <span className="pa-kicker">VIDEO ANALYSIS</span>
+            <h2>Upload a video</h2>
+            <p>Upload a video to start frame-by-frame people detection and tracking.</p>
+          </div>
+          <span className="pa-engine-tag">TensorFlow Lite Runtime</span>
+        </div>
 
-      <section className="pa-panel">
-        <h2>Upload video</h2>
-
-        <form
-          onSubmit={startProcessing}
-          className="pa-form"
-        >
-          <label className="pa-file-label">
-            <span>
-              Select video (MP4, AVI, MOV, MKV, WEBM)
-            </span>
-
+        <form onSubmit={handleSubmit} className="pa-form">
+          <label className="pa-file-drop">
+            <span className="pa-upload-icon" aria-hidden="true">↑</span>
+            <strong>{file ? "Video selected" : "Choose a video file"}</strong>
+            <span>MP4, AVI, MOV, MKV or WEBM · Maximum 500 MB</span>
             <input
               type="file"
               accept="video/mp4,video/avi,video/quicktime,video/x-matroska,video/webm,.mp4,.avi,.mov,.mkv,.webm"
-              onChange={(event) =>
-                setFile(
-                  event.target.files?.[0] || null
-                )
-              }
+              onChange={handleFileChange}
+              disabled={submitting || active}
             />
           </label>
 
-          {file ? (
-            <div className="pa-file-name">
-              {file.name} ·{" "}
-              {(file.size / (1024 * 1024)).toFixed(2)} MB
+          {file && (
+            <div className="pa-selected-file">
+              <div className="pa-file-symbol">MP4</div>
+              <div className="pa-file-details">
+                <strong title={file.name}>{file.name}</strong>
+                <span>{formatBytes(file.size)}</span>
+              </div>
+              <button
+                type="button"
+                className="pa-text-button"
+                onClick={() => setFile(null)}
+                disabled={submitting || active}
+              >
+                Remove
+              </button>
             </div>
-          ) : null}
+          )}
 
           <div className="pa-settings-grid">
-
-            <label>
-              Confidence threshold:{" "}
-              <strong>
-                {confidence.toFixed(2)}
-              </strong>
-
+            <label className="pa-setting">
+              <span>Confidence threshold <strong>{confidence.toFixed(2)}</strong></span>
               <input
                 type="range"
                 min="0.05"
                 max="0.95"
                 step="0.05"
                 value={confidence}
-                onChange={(event) =>
-                  setConfidence(
-                    Number(event.target.value)
-                  )
-                }
+                onChange={(event) => setConfidence(Number(event.target.value))}
+                disabled={submitting || active}
               />
+              <small>Higher values reduce low-confidence detections.</small>
             </label>
 
-            <label>
-              Frame interval
-
+            <label className="pa-setting">
+              <span>Frame interval</span>
               <select
                 value={frameInterval}
-                onChange={(event) =>
-                  setFrameInterval(
-                    Number(event.target.value)
-                  )
-                }
+                onChange={(event) => setFrameInterval(Number(event.target.value))}
+                disabled={submitting || active}
               >
-                <option value={1}>
-                  1 – Process every frame
-                </option>
-
-                <option value={2}>
-                  2 – Every 2nd frame
-                </option>
-
-                <option value={3}>
-                  3 – Every 3rd frame
-                </option>
-
-                <option value={5}>
-                  5 – Every 5th frame
-                </option>
+                <option value={1}>Every frame (best detail)</option>
+                <option value={2}>Every 2nd frame</option>
+                <option value={3}>Every 3rd frame</option>
+                <option value={5}>Every 5th frame</option>
               </select>
+              <small>Use every frame for the most complete tracking results.</small>
             </label>
-
           </div>
 
           <button
             className="pa-primary-button"
             type="submit"
-            disabled={
-              !file ||
-              submitting ||
-              isActive
-            }
+            disabled={!file || submitting || active}
           >
-            {submitting
-              ? "Uploading video…"
-              : isActive
-              ? "Video processing in progress"
-              : "Upload & Start Detection"}
+            {submitting ? "Uploading video…" : active ? "Processing in progress…" : "Upload & Start Detection"}
           </button>
         </form>
 
-        {!backend.model_loaded &&
-        !backend.checking ? (
-          <p className="pa-warning">
-            The backend is reachable, but the detection
-            model is not confirmed as loaded. Check the
-            backend health endpoint.
-          </p>
-        ) : null}
+        {!backend.model_loaded && !backend.checking && (
+          <div className="pa-inline-warning">
+            Backend health check has not confirmed that the YOLO model is loaded. Check the Render health endpoint before starting a long job.
+          </div>
+        )}
       </section>
 
-      {/* ERROR MESSAGE */}
+      {error && <div className="pa-error" role="alert">{error}</div>}
+      {!error && notice && <div className="pa-notice" role="status">{notice}</div>}
 
-      {error ? (
-        <div className="pa-error" role="alert">
-          {error}
-        </div>
-      ) : null}
+      {job && (
+        <ProcessingStatus
+          job={job}
+          isPolling={isPolling}
+          onStopPolling={stopPolling}
+          showActivity
+        />
+      )}
 
-      {/* LIVE PROCESSING DASHBOARD */}
-
-      {job ? (
-        <section className="pa-panel pa-live-panel">
-
-          <div className="pa-section-heading">
+      {completed && (
+        <section className="pa-panel pa-results-panel">
+          <div className="pa-section-title">
             <div>
-              <h2>Live processing activity</h2>
-
-              <p>
-                {job.message ||
-                  "Waiting for processing updates…"}
-              </p>
+              <span className="pa-kicker">ANALYSIS COMPLETE</span>
+              <h2>Processing results</h2>
+              <p>{completed.message || "Your processed video and analytics reports are ready."}</p>
             </div>
-
-            <span
-              className={`pa-job-status status-${
-                job.status || "queued"
-              }`}
-            >
-              {job.status || "queued"}
-            </span>
+            <span className="pa-complete-mark">✓ Completed</span>
           </div>
 
-          {/* PROGRESS */}
-
-          <div className="pa-progress-heading">
-            <strong>
-              {job.current_frame ?? 0} /{" "}
-              {job.total_frames ?? "—"} frames
-            </strong>
-
-            <strong>
-              {progress.toFixed(1)}%
-            </strong>
-          </div>
-
-          <div className="pa-progress-track">
-            <div
-              className="pa-progress-fill"
-              style={{
-                width: `${progress}%`,
-              }}
-            />
-          </div>
-
-          <div className="pa-progress-meta">
-            <span>
-              Elapsed:{" "}
-              {formatSeconds(
-                job.processing_seconds
-              )}
-            </span>
-
-            <span>
-              Estimated remaining:{" "}
-              {formatSeconds(job.eta_seconds)}
-            </span>
-          </div>
-
-          {/* LIVE METRICS */}
-
-          <div className="pa-metrics-grid">
-
-            <Metric
-              label="People in current frame"
-              value={
-                job.current_people ??
-                latest?.people_found ??
-                0
-              }
-            />
-
-            <Metric
-              label="Objects in current frame"
-              value={
-                job.current_objects ??
-                latest?.objects_found ??
-                0
-              }
-            />
-
-            <Metric
-              label="Unique people tracked"
-              value={
-                job.unique_people_so_far ??
-                latest?.unique_people_so_far ??
-                0
-              }
-            />
-
-            <Metric
-              label="Latest frame time"
-              value={
-                latest
-                  ? `${Number(
-                      latest.frame_seconds || 0
-                    ).toFixed(2)}s`
-                  : "—"
-              }
-            />
-
-          </div>
-
-          {/* LATEST FRAME */}
-
-          {latest ? (
-            <div className="pa-latest-frame">
-
-              <h3>Latest frame result</h3>
-
-              <div className="pa-latest-grid">
-
-                <div>
-                  <span>Frame</span>
-                  <strong>
-                    {latest.frame_number} /{" "}
-                    {latest.total_frames}
-                  </strong>
-                </div>
-
-                <div>
-                  <span>Video timestamp</span>
-                  <strong>
-                    {formatTimestamp(
-                      latest.timestamp_seconds
-                    )}
-                  </strong>
-                </div>
-
-                <div>
-                  <span>Inference</span>
-                  <strong>
-                    {latest.inference_performed
-                      ? "Performed"
-                      : "Skipped / carried forward"}
-                  </strong>
-                </div>
-
-                <div>
-                  <span>YOLO inference time</span>
-                  <strong>
-                    {Number(
-                      latest.inference_seconds || 0
-                    ).toFixed(3)}
-                    s
-                  </strong>
-                </div>
-
-                <div>
-                  <span>Frame processing time</span>
-                  <strong>
-                    {Number(
-                      latest.frame_seconds || 0
-                    ).toFixed(3)}
-                    s
-                  </strong>
-                </div>
-
-                <div>
-                  <span>Frame status</span>
-                  <strong>
-                    {latest.status || "—"}
-                  </strong>
-                </div>
-
-              </div>
-
-              <p className="pa-track-ids">
-                <strong>Track IDs:</strong>{" "}
-                {latest.track_ids?.length
-                  ? latest.track_ids.join(", ")
-                  : "No tracked people in this frame"}
-              </p>
-
-            </div>
-          ) : (
-            <p className="pa-muted">
-              Waiting for the first frame update from YOLO11…
-            </p>
-          )}
-
-          {/* RECENT FRAME ACTIVITY */}
-
-          <div className="pa-activity">
-
-            <div className="pa-section-heading">
-              <h3>Recent frame activity</h3>
-
-              <span>
-                {activity.length} updates
-              </span>
-            </div>
-
-            {activity.length ? (
-
-              <div className="pa-table-wrap">
-
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Frame</th>
-                      <th>Timestamp</th>
-                      <th>People</th>
-                      <th>Objects</th>
-                      <th>Track IDs</th>
-                      <th>Frame time</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {activity.map((item, index) => (
-                      <tr
-                        key={`${
-                          item.frame_number ?? "frame"
-                        }-${index}`}
-                      >
-                        <td>
-                          {item.frame_number ?? "—"}
-                        </td>
-
-                        <td>
-                          {formatTimestamp(
-                            item.timestamp_seconds
-                          )}
-                        </td>
-
-                        <td>
-                          {item.people_found ?? 0}
-                        </td>
-
-                        <td>
-                          {item.objects_found ?? 0}
-                        </td>
-
-                        <td>
-                          {item.track_ids?.length
-                            ? item.track_ids.join(", ")
-                            : "—"}
-                        </td>
-
-                        <td>
-                          {Number(
-                            item.frame_seconds || 0
-                          ).toFixed(2)}
-                          s
-                        </td>
-
-                        <td>
-                          {item.status || "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-
-              </div>
-
-            ) : (
-              <p className="pa-muted">
-                Frame updates will appear here as processing continues.
-              </p>
+          <div className="pa-download-grid">
+            {completed.video_url && (
+              <button type="button" className="pa-download-card" onClick={() => handleDownload("video")}>
+                <span className="pa-download-icon">▶</span>
+                <span><strong>Processed video</strong><small>Annotated MP4 output</small></span>
+                <span className="pa-download-arrow">↓</span>
+              </button>
             )}
-
+            {completed.csv_url && (
+              <button type="button" className="pa-download-card" onClick={() => handleDownload("csv")}>
+                <span className="pa-download-icon">CSV</span>
+                <span><strong>Frame analytics</strong><small>Download CSV report</small></span>
+                <span className="pa-download-arrow">↓</span>
+              </button>
+            )}
+            {completed.json_url && (
+              <button type="button" className="pa-download-card" onClick={() => handleDownload("json")}>
+                <span className="pa-download-icon">JSON</span>
+                <span><strong>Full analytics</strong><small>Download JSON report</small></span>
+                <span className="pa-download-arrow">↓</span>
+              </button>
+            )}
           </div>
 
-          {isActive && isPolling ? (
-            <button
-              type="button"
-              className="pa-secondary-button"
-              onClick={stopLocalPolling}
-            >
-              Stop checking progress
-            </button>
-          ) : null}
-
-        </section>
-      ) : null}
-
-      {/* COMPLETED RESULTS */}
-
-      {completedResult ? (
-        <section className="pa-panel">
-
-          <h2>Processing completed</h2>
-
-          <p>
-            {completedResult.message ||
-              "Your video has been processed successfully."}
-          </p>
-
-          <div className="pa-downloads">
-
-            {completedResult.video_url ? (
-              <a
-                href={outputUrl(
-                  completedResult.video_url
-                )}
-                target="_blank"
-                rel="noreferrer"
-              >
-                View processed video
-              </a>
-            ) : null}
-
-            {completedResult.csv_url ? (
-              <a
-                href={outputUrl(
-                  completedResult.csv_url
-                )}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Download CSV report
-              </a>
-            ) : null}
-
-            {completedResult.json_url ? (
-              <a
-                href={outputUrl(
-                  completedResult.json_url
-                )}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Download JSON report
-              </a>
-            ) : null}
-
-          </div>
-
-          {completedResult.analytics ||
-          completedResult.summary ? (
+          {(completed.analytics || completed.summary) && (
             <details className="pa-analytics-details">
-
-              <summary>
-                View full analytics JSON
-              </summary>
-
-              <pre>
-                {JSON.stringify(
-                  completedResult.analytics ||
-                    completedResult.summary,
-                  null,
-                  2
-                )}
-              </pre>
-
+              <summary>View final analytics details</summary>
+              <pre>{JSON.stringify(completed.analytics || completed.summary, null, 2)}</pre>
             </details>
-          ) : null}
-
+          )}
         </section>
-      ) : null}
-
-      {/* FOOTER */}
+      )}
 
       <footer className="pa-footer">
-        PragyanAI · YOLO11 Object Detection &amp; People Analytics
+        <span>PRAGYANAI</span>
+        <span>YOLO11 Object Detection &amp; People Analytics</span>
       </footer>
-
     </main>
   );
 }
