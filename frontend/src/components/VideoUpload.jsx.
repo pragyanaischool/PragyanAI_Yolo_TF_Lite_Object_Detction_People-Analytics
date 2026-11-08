@@ -1,18 +1,31 @@
 
-import React, { useEffect, useState } from "react";
+import React, { useRef, useState } from "react";
 
 import {
+  Upload,
   Video,
   FileVideo,
-  Trash2,
-  Clock,
-  HardDrive,
-  FileType,
+  X,
+  CheckCircle,
   AlertCircle
 } from "lucide-react";
 
 // --------------------------------------------------
-// Helper: Format File Size
+// Configuration
+// --------------------------------------------------
+
+const MAX_FILE_SIZE = 500 * 1024 * 1024;
+
+const SUPPORTED_EXTENSIONS = [
+  "mp4",
+  "avi",
+  "mov",
+  "mkv",
+  "webm"
+];
+
+// --------------------------------------------------
+// Format File Size
 // --------------------------------------------------
 
 function formatFileSize(bytes) {
@@ -32,275 +45,275 @@ function formatFileSize(bytes) {
 }
 
 // --------------------------------------------------
-// Helper: Format Duration
+// Validate Video
 // --------------------------------------------------
 
-function formatDuration(seconds) {
-  if (!Number.isFinite(seconds)) {
-    return "Calculating...";
+function validateVideo(file) {
+  if (!file) {
+    return "Please select a video file.";
   }
 
-  const totalSeconds = Math.floor(seconds);
+  const extension = file.name
+    .split(".")
+    .pop()
+    .toLowerCase();
 
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const remainingSeconds = totalSeconds % 60;
-
-  if (hours > 0) {
-    return [
-      hours,
-      String(minutes).padStart(2, "0"),
-      String(remainingSeconds).padStart(2, "0")
-    ].join(":");
+  if (!SUPPORTED_EXTENSIONS.includes(extension)) {
+    return "Unsupported format. Upload MP4, AVI, MOV, MKV or WebM.";
   }
 
-  return [
-    String(minutes).padStart(2, "0"),
-    String(remainingSeconds).padStart(2, "0")
-  ].join(":");
+  if (file.size === 0) {
+    return "The selected video file is empty.";
+  }
+
+  if (file.size > MAX_FILE_SIZE) {
+    return "File size exceeds the maximum allowed limit of 500 MB.";
+  }
+
+  return null;
 }
 
 // --------------------------------------------------
-// Video Preview Component
+// Video Upload Component
 // --------------------------------------------------
 
-function VideoPreview({
-  file,
-  onRemove,
+function VideoUpload({
+  selectedFile,
+  onFileSelect,
   disabled = false
 }) {
-  const [videoUrl, setVideoUrl] = useState("");
-  const [duration, setDuration] = useState(null);
-  const [videoError, setVideoError] = useState("");
+  const fileInputRef = useRef(null);
+
+  const [isDragging, setIsDragging] = useState(false);
+  const [error, setError] = useState("");
 
   // ------------------------------------------------
-  // Create and release temporary video URL
+  // Process Selected File
   // ------------------------------------------------
 
-  useEffect(() => {
-    if (!file) {
-      setVideoUrl("");
-      setDuration(null);
+  const handleFile = (file) => {
+    if (disabled) return;
+
+    setError("");
+
+    const validationError = validateVideo(file);
+
+    if (validationError) {
+      setError(validationError);
       return;
     }
 
-    const url = URL.createObjectURL(file);
-
-    setVideoUrl(url);
-    setDuration(null);
-    setVideoError("");
-
-    return () => {
-      URL.revokeObjectURL(url);
-    };
-  }, [file]);
+    onFileSelect?.(file);
+  };
 
   // ------------------------------------------------
-  // Extract Video Metadata
+  // Browse Files
   // ------------------------------------------------
 
-  const handleMetadataLoaded = (event) => {
-    const video = event.currentTarget;
+  const handleBrowse = () => {
+    if (disabled) return;
 
-    if (Number.isFinite(video.duration)) {
-      setDuration(video.duration);
-    } else {
-      setDuration(0);
+    fileInputRef.current?.click();
+  };
+
+  // ------------------------------------------------
+  // File Input Change
+  // ------------------------------------------------
+
+  const handleInputChange = (event) => {
+    const file = event.target.files?.[0];
+
+    if (file) {
+      handleFile(file);
     }
 
-    setVideoError("");
+    // Allow selecting the same file again
+    event.target.value = "";
   };
 
   // ------------------------------------------------
-  // Handle Video Loading Error
+  // Drag Over
   // ------------------------------------------------
 
-  const handleVideoError = () => {
-    setVideoError(
-      "Unable to preview this video in your browser. The backend may still support processing this format."
-    );
+  const handleDragOver = (event) => {
+    event.preventDefault();
+
+    if (!disabled) {
+      setIsDragging(true);
+    }
   };
 
   // ------------------------------------------------
-  // Remove Video
+  // Drag Leave
+  // ------------------------------------------------
+
+  const handleDragLeave = (event) => {
+    event.preventDefault();
+
+    if (!event.currentTarget.contains(event.relatedTarget)) {
+      setIsDragging(false);
+    }
+  };
+
+  // ------------------------------------------------
+  // Drop File
+  // ------------------------------------------------
+
+  const handleDrop = (event) => {
+    event.preventDefault();
+
+    setIsDragging(false);
+
+    if (disabled) return;
+
+    const file = event.dataTransfer.files?.[0];
+
+    if (!file) {
+      setError("No file was selected.");
+      return;
+    }
+
+    handleFile(file);
+  };
+
+  // ------------------------------------------------
+  // Remove File
   // ------------------------------------------------
 
   const handleRemove = () => {
     if (disabled) return;
 
-    if (onRemove) {
-      onRemove();
+    onFileSelect?.(null);
+    setError("");
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
     }
   };
-
-  // ------------------------------------------------
-  // File Information
-  // ------------------------------------------------
-
-  const fileExtension = file?.name
-    ?.split(".")
-    .pop()
-    ?.toUpperCase() || "VIDEO";
-
-  if (!file) {
-    return null;
-  }
 
   // ------------------------------------------------
   // Render
   // ------------------------------------------------
 
   return (
-    <section className="preview-card">
+    <section
+      className={`upload-card ${isDragging ? "drag-active" : ""}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
 
-      {/* Preview Header */}
-      <div className="preview-header">
+      <div className="upload-content">
 
-        <div>
-          <h2>Video Preview</h2>
-
-          <p className="card-description">
-            Review your uploaded video before processing.
-          </p>
+        {/* Upload Icon */}
+        <div className="upload-icon">
+          <Upload size={30} strokeWidth={1.8} />
         </div>
 
+        <h2>Upload Your Video</h2>
+
+        <p>
+          Drag and drop your video here or browse files
+          from your computer.
+        </p>
+
+        {/* Browse Button */}
         <button
           type="button"
-          className="remove-button"
-          onClick={handleRemove}
+          className="upload-button"
+          onClick={handleBrowse}
           disabled={disabled}
-          title="Remove uploaded video"
-          aria-label="Remove uploaded video"
         >
-          <Trash2 size={15} />
-          Remove
+          <Video size={17} />
+          Browse Video
         </button>
+
+        {/* Hidden File Input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="upload-input"
+          accept=".mp4,.avi,.mov,.mkv,.webm,video/*"
+          onChange={handleInputChange}
+          disabled={disabled}
+          aria-label="Select video file"
+        />
+
+        <span className="upload-hint">
+          Supported formats: MP4, AVI, MOV, MKV, WebM
+          <br />
+          Maximum file size: 500 MB
+        </span>
 
       </div>
 
-      {/* Video Player */}
-      {videoUrl && (
-        <div className="video-preview-container">
+      {/* Selected File Information */}
+      {selectedFile && (
+        <div className="selected-file">
 
-          {!videoError ? (
-            <video
-              key={videoUrl}
-              className="preview-video"
-              src={videoUrl}
-              controls
-              playsInline
-              preload="metadata"
-              onLoadedMetadata={handleMetadataLoaded}
-              onError={handleVideoError}
-            >
-              Your browser does not support HTML5 video.
-            </video>
-          ) : (
-            <div className="video-preview-error">
-              <AlertCircle size={28} />
+          <div className="file-information">
 
-              <p>{videoError}</p>
+            <div className="file-icon">
+              <FileVideo size={25} />
             </div>
-          )}
+
+            <div>
+              <div className="file-name">
+                {selectedFile.name}
+              </div>
+
+              <div className="file-size">
+                {formatFileSize(selectedFile.size)}
+              </div>
+            </div>
+
+          </div>
+
+          <div className="file-actions">
+
+            <CheckCircle
+              size={19}
+              color="#16a34a"
+              aria-label="File selected"
+            />
+
+            <button
+              type="button"
+              className="remove-button"
+              onClick={handleRemove}
+              disabled={disabled}
+              aria-label="Remove selected video"
+              title="Remove video"
+            >
+              <X size={15} />
+            </button>
+
+          </div>
 
         </div>
       )}
 
-      {/* Video Information */}
-      <div className="video-information-grid">
-
-        {/* File Name */}
-        <div className="video-info-item">
-
-          <div className="video-info-icon">
-            <FileVideo size={18} />
-          </div>
-
-          <div>
-            <span className="video-info-label">
-              File Name
-            </span>
-
-            <strong className="video-info-value">
-              {file.name}
-            </strong>
-          </div>
-
+      {/* Validation Error */}
+      {error && (
+        <div
+          className="error-message upload-error"
+          role="alert"
+        >
+          <AlertCircle size={17} />
+          <p>{error}</p>
         </div>
+      )}
 
-        {/* File Size */}
-        <div className="video-info-item">
-
-          <div className="video-info-icon">
-            <HardDrive size={18} />
-          </div>
-
-          <div>
-            <span className="video-info-label">
-              File Size
-            </span>
-
-            <strong className="video-info-value">
-              {formatFileSize(file.size)}
-            </strong>
-          </div>
-
+      {/* Dragging Indicator */}
+      {isDragging && (
+        <div className="drag-overlay">
+          <Upload size={32} />
+          <strong>Drop your video here</strong>
         </div>
-
-        {/* Duration */}
-        <div className="video-info-item">
-
-          <div className="video-info-icon">
-            <Clock size={18} />
-          </div>
-
-          <div>
-            <span className="video-info-label">
-              Duration
-            </span>
-
-            <strong className="video-info-value">
-              {duration === null
-                ? "Loading..."
-                : formatDuration(duration)}
-            </strong>
-          </div>
-
-        </div>
-
-        {/* Video Format */}
-        <div className="video-info-item">
-
-          <div className="video-info-icon">
-            <FileType size={18} />
-          </div>
-
-          <div>
-            <span className="video-info-label">
-              Format
-            </span>
-
-            <strong className="video-info-value">
-              {fileExtension}
-            </strong>
-          </div>
-
-        </div>
-
-      </div>
-
-      {/* Preview Information */}
-      <div className="preview-information">
-        <Video size={16} />
-
-        <span>
-          Your video is ready for AI-powered people detection and tracking.
-        </span>
-      </div>
+      )}
 
     </section>
   );
 }
 
-export default VideoPreview;
-
+export default VideoUpload;
