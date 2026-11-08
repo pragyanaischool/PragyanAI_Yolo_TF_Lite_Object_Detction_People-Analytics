@@ -128,6 +128,11 @@ MAX_UPLOAD_SIZE = int(
 
 CHUNK_SIZE = 1024 * 1024
 
+# Resource-conservative defaults for the Render instance.
+DEFAULT_FRAME_INTERVAL = max(1, int(os.getenv("DEFAULT_FRAME_INTERVAL", "2")))
+MAX_CONCURRENT_JOBS = 1
+PROCESSING_LOCK = threading.Lock()
+
 
 # =========================================================
 # APPLICATION STATE
@@ -167,6 +172,9 @@ async def lifespan(app: FastAPI):
     logger.info("Output directory: %s", OUTPUT_DIR)
     logger.info("Frontend origin: %s", FRONTEND_ORIGIN)
     logger.info("Maximum upload size: %s bytes", MAX_UPLOAD_SIZE)
+    logger.info("Default frame interval: %s", DEFAULT_FRAME_INTERVAL)
+    logger.info("Maximum concurrent video jobs: %s", MAX_CONCURRENT_JOBS)
+    logger.info("YOLO inference image size: 320 (configured in VideoProcessor)")
     logger.info("Python process PID: %s", os.getpid())
     logger.info("Model file exists: %s", MODEL_PATH.is_file())
 
@@ -434,6 +442,10 @@ async def health_check():
         "model_path": str(MODEL_PATH),
         "model_exists": MODEL_PATH.exists(),
         "model_error": model_error,
+        "processing_busy": PROCESSING_LOCK.locked(),
+        "max_concurrent_jobs": MAX_CONCURRENT_JOBS,
+        "default_frame_interval": DEFAULT_FRAME_INTERVAL,
+        "default_imgsz": 320,
     }
 
 
@@ -668,6 +680,9 @@ async def process_job_background(
 
     finally:
         cleanup_file(input_path)
+        if PROCESSING_LOCK.locked():
+            PROCESSING_LOCK.release()
+            logger.info("[PROCESSING SLOT RELEASED] job_id=%s", job_id)
 
 
 # =========================================================
@@ -679,7 +694,7 @@ async def create_video_job(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     confidence: float = Form(0.35),
-    frame_interval: int = Form(1),
+    frame_interval: int = Form(DEFAULT_FRAME_INTERVAL),
 ):
     """
     Upload and validate a video, create a job, and return immediately.
@@ -687,6 +702,7 @@ async def create_video_job(
     """
     request_started = time.perf_counter()
     input_path = None
+    processing_slot_reserved = False
 
     try:
         current_processor = get_current_processor()
@@ -705,6 +721,15 @@ async def create_video_job(
                 status_code=400,
                 detail="Unsupported video format. Supported formats: MP4, AVI, MOV, MKV, WEBM.",
             )
+
+        # Reserve the single processing slot before accepting a large upload.
+        # This prevents multiple uploads from competing for disk and memory.
+        if not PROCESSING_LOCK.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429,
+                detail="Another video is currently uploading or processing. Please wait until it finishes.",
+            )
+        processing_slot_reserved = True
 
         job_id = uuid.uuid4().hex
         input_path = UPLOAD_DIR / safe_filename(original_filename)
@@ -789,9 +814,13 @@ async def create_video_job(
 
     except HTTPException:
         cleanup_file(input_path)
+        if processing_slot_reserved and PROCESSING_LOCK.locked():
+            PROCESSING_LOCK.release()
         raise
     except Exception as exc:
         cleanup_file(input_path)
+        if processing_slot_reserved and PROCESSING_LOCK.locked():
+            PROCESSING_LOCK.release()
         logger.exception("[ASYNC JOB CREATE FAILED] error=%s", exc)
         raise HTTPException(
             status_code=500,
@@ -858,7 +887,7 @@ async def get_video_job_analytics(job_id: str):
 async def process_video(
     file: UploadFile = File(...),
     confidence: float = Form(0.35),
-    frame_interval: int = Form(1),
+    frame_interval: int = Form(DEFAULT_FRAME_INTERVAL),
 ):
     """
     Upload a video and process it using YOLO11 TFLite
@@ -881,6 +910,7 @@ async def process_video(
     job_id = None
     current_stage = "request_received"
     uploaded_size = 0
+    processing_slot_reserved = False
 
     logger.info("=" * 72)
     logger.info(
@@ -1095,6 +1125,14 @@ async def process_video(
         # -------------------------------------------------
 
         current_stage = "yolo_bytetrack_processing"
+
+        if not PROCESSING_LOCK.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429,
+                detail="Another video is currently processing. Please wait until it finishes.",
+            )
+        processing_slot_reserved = True
+
         processing_started = time.perf_counter()
 
         logger.info(
@@ -1330,6 +1368,10 @@ async def process_video(
         )
 
     finally:
+
+        if processing_slot_reserved and PROCESSING_LOCK.locked():
+            PROCESSING_LOCK.release()
+            logger.info("[PROCESSING SLOT RELEASED] job_id=%s", job_id)
 
         # Delete temporary uploaded input.
         cleanup_file(input_path)
