@@ -1,47 +1,24 @@
 
 /*
-============================================================
-PragyanAI - People Detection & Counting
-File: frontend/src/services/api.js
-
-Backend: FastAPI / Render
-Detection: YOLO11 TFLite
-Tracking: ByteTrack
-Video processing: OpenCV
-
-Supports:
-- Backend health and model checks
-- Video validation and upload
-- Asynchronous job creation
-- Live frame-by-frame job polling
-- People/object counts and tracking IDs
-- Processing analytics
-- Output listing, deletion and downloads
-============================================================
-*/
-
-// ----------------------------------------------------------
-// 1. API CONFIGURATION
-// ----------------------------------------------------------
+ * PragyanAI People Detection & Counting - API client
+ * FastAPI backend: Render
+ * Frontend: React + Vite / Netlify
+ */
 
 const DEFAULT_API_URL =
   "https://pragyanai-yolo-tf-lite-object-detction.onrender.com";
 
 const API_BASE_URL = String(
   import.meta.env.VITE_API_BASE_URL || DEFAULT_API_URL
-)
-  .trim()
-  .replace(/\/+$/, "");
+).trim().replace(/\/+$/, "");
 
 const API_URL = `${API_BASE_URL}/api`;
 
 export const API_CONFIG = {
   BASE_URL: API_BASE_URL,
   API_URL,
-  ROOT_URL: API_BASE_URL,
   HEALTH_URL: `${API_BASE_URL}/health`,
   MODEL_INFO_URL: `${API_URL}/model-info`,
-  PROCESS_URL: `${API_URL}/process`, // Legacy synchronous endpoint
   JOBS_URL: `${API_URL}/jobs`,
   OUTPUTS_URL: `${API_URL}/outputs`,
   MAX_UPLOAD_SIZE: 500 * 1024 * 1024,
@@ -50,27 +27,26 @@ export const API_CONFIG = {
   MAX_JOB_WAIT_MS: 3 * 60 * 60 * 1000,
 };
 
-console.info("PragyanAI API base URL:", API_BASE_URL);
-
-
-// ----------------------------------------------------------
-// 2. COMMON RESPONSE HANDLER
-// ----------------------------------------------------------
+// =====================================================
+// RESPONSE HANDLING
+// =====================================================
 
 export const parseResponse = async (response) => {
   const contentType = response.headers.get("content-type") || "";
   let data;
 
-  if (contentType.includes("application/json")) {
-    data = await response.json();
-  } else {
-    data = await response.text();
+  try {
+    data = contentType.includes("application/json")
+      ? await response.json()
+      : await response.text();
+  } catch {
+    data = null;
   }
 
   if (!response.ok) {
-    let message;
+    let message = `Request failed with HTTP ${response.status}`;
 
-    if (typeof data === "string") {
+    if (typeof data === "string" && data) {
       message = data;
     } else if (typeof data?.detail === "string") {
       message = data.detail;
@@ -78,8 +54,6 @@ export const parseResponse = async (response) => {
       message = data.detail.message;
     } else if (data?.message) {
       message = data.message;
-    } else {
-      message = `Request failed with HTTP ${response.status}`;
     }
 
     const error = new Error(message);
@@ -91,68 +65,85 @@ export const parseResponse = async (response) => {
   return data;
 };
 
+// =====================================================
+// COMMON API REQUEST
+// =====================================================
 
-// ----------------------------------------------------------
-// 3. GENERIC GET REQUEST
-// ----------------------------------------------------------
+const request = async (url, options = {}) => {
+  let response;
 
-const get = async (url, options = {}) => {
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      ...(options.headers || {}),
-    },
-    cache: "no-store",
-    signal: options.signal,
-  });
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers: {
+        Accept: "application/json",
+        ...(options.headers || {}),
+      },
+    });
+  } catch (error) {
+    const wrapped = new Error(
+      `Unable to connect to the PragyanAI backend: ${error.message}`
+    );
+
+    wrapped.cause = error;
+    throw wrapped;
+  }
 
   return parseResponse(response);
 };
 
-
-// ----------------------------------------------------------
-// 4. BACKEND HEALTH CHECK
-// ----------------------------------------------------------
+// =====================================================
+// BACKEND HEALTH CHECK
+// =====================================================
 
 export const healthCheck = async () => {
   try {
-    const data = await get(API_CONFIG.HEALTH_URL);
+    const data = await request(
+      API_CONFIG.HEALTH_URL,
+      {
+        method: "GET",
+        cache: "no-store",
+      }
+    );
 
     const connected =
-      data.backend_connected === true ||
-      data.api === "running" ||
-      data.status === "healthy" ||
-      data.status === "degraded";
+      data?.api === "running" ||
+      data?.status === "healthy" ||
+      data?.status === "degraded" ||
+      data?.status === "ok";
 
-    const modelLoaded = data.model_loaded === true;
+    const modelLoaded = data?.model_loaded === true;
 
     return {
       connected,
       checking: false,
       model_loaded: modelLoaded,
+
       model_status:
-        data.model_status ||
+        data?.model_status ||
         (modelLoaded ? "ready" : "not_ready"),
-      status: data.status || "unknown",
-      api: data.api || null,
-      model_exists: data.model_exists ?? null,
-      model_path: data.model_path || null,
-      model_error: data.model_error || null,
-      detection_engine: data.detection_engine || "YOLO11",
-      tracking_engine: data.tracking_engine || "ByteTrack",
+
+      status: data?.status || "unknown",
+      api: data?.api || null,
+
+      model_exists: data?.model_exists ?? null,
+      model_path: data?.model_path || null,
+      model_error: data?.model_error || null,
+
+      detection_engine: data?.detection_engine || "YOLO11",
+      tracking_engine: data?.tracking_engine || "ByteTrack",
       inference_runtime:
-        data.inference_runtime || "TensorFlow Lite",
+        data?.inference_runtime || "TensorFlow Lite",
+
       message: modelLoaded
         ? "Backend connected. YOLO11 model is ready."
         : connected
-          ? "Backend connected, but the model is not ready."
+          ? "Backend connected, but the model is not confirmed as ready."
           : "Backend connection could not be verified.",
+
       raw: data,
     };
   } catch (error) {
-    console.error("PragyanAI health check failed:", error);
-
     return {
       connected: false,
       checking: false,
@@ -172,33 +163,21 @@ export const healthCheck = async () => {
   }
 };
 
-export const getBackendStatus = async () => healthCheck();
+export const getBackendStatus = healthCheck;
 
-export const testBackendConnection = async () => {
-  const result = await healthCheck();
+// =====================================================
+// MODEL INFORMATION
+// =====================================================
 
-  return {
-    success: result.connected,
-    connected: result.connected,
-    model_loaded: result.model_loaded,
-    model_status: result.model_status,
-    message: result.message,
-    details: result,
-  };
-};
+export const getModelInfo = () =>
+  request(API_CONFIG.MODEL_INFO_URL, {
+    method: "GET",
+    cache: "no-store",
+  });
 
-
-// ----------------------------------------------------------
-// 5. MODEL INFORMATION
-// ----------------------------------------------------------
-
-export const getModelInfo = async () =>
-  get(API_CONFIG.MODEL_INFO_URL);
-
-
-// ----------------------------------------------------------
-// 6. VIDEO VALIDATION
-// ----------------------------------------------------------
+// =====================================================
+// VIDEO FILE VALIDATION
+// =====================================================
 
 export const validateVideoFile = (file) => {
   if (!file) {
@@ -212,7 +191,7 @@ export const validateVideoFile = (file) => {
 
   if (!API_CONFIG.ALLOWED_EXTENSIONS.includes(extension)) {
     throw new Error(
-      "Unsupported video format. Please upload MP4, AVI, MOV, MKV or WEBM."
+      "Unsupported video format. Upload MP4, AVI, MOV, MKV or WEBM."
     );
   }
 
@@ -222,7 +201,7 @@ export const validateVideoFile = (file) => {
 
   if (file.size > API_CONFIG.MAX_UPLOAD_SIZE) {
     throw new Error(
-      "Video size exceeds the maximum limit of 500 MB."
+      "Video exceeds the maximum upload size of 500 MB."
     );
   }
 
@@ -237,10 +216,9 @@ export const validateVideoFile = (file) => {
   };
 };
 
-
-// ----------------------------------------------------------
-// 7. CREATE ASYNC VIDEO JOB
-// ----------------------------------------------------------
+// =====================================================
+// CREATE VIDEO PROCESSING JOB
+// =====================================================
 
 export const createVideoJob = async (
   file,
@@ -258,7 +236,9 @@ export const createVideoJob = async (
     confidenceValue < 0 ||
     confidenceValue > 1
   ) {
-    throw new Error("Confidence must be between 0 and 1.");
+    throw new Error(
+      "Confidence must be between 0 and 1."
+    );
   }
 
   if (
@@ -276,40 +256,16 @@ export const createVideoJob = async (
   formData.append("confidence", String(confidenceValue));
   formData.append("frame_interval", String(intervalValue));
 
-  let response;
-
-  try {
-    response = await fetch(API_CONFIG.JOBS_URL, {
-      method: "POST",
-      body: formData,
-      signal: options.signal,
-    });
-  } catch (error) {
-    throw new Error(
-      `Could not connect to the backend while uploading the video: ${error.message}`
-    );
-  }
-
-  const created = await parseResponse(response);
-
-  if (!created?.job_id) {
-    throw new Error(
-      "Backend did not return a valid job ID."
-    );
-  }
-
-  console.info(
-    "PragyanAI processing job created:",
-    created.job_id
-  );
-
-  return created;
+  return request(API_CONFIG.JOBS_URL, {
+    method: "POST",
+    body: formData,
+    signal: options.signal,
+  });
 };
 
-
-// ----------------------------------------------------------
-// 8. GET JOB STATUS / LIVE FRAME UPDATES
-// ----------------------------------------------------------
+// =====================================================
+// GET JOB STATUS / LIVE UPDATES
+// =====================================================
 
 export const getJobStatus = async (
   jobId,
@@ -319,11 +275,19 @@ export const getJobStatus = async (
     throw new Error("Job ID is required.");
   }
 
-  return get(
+  return request(
     `${API_CONFIG.JOBS_URL}/${encodeURIComponent(jobId)}`,
-    options
+    {
+      method: "GET",
+      cache: "no-store",
+      signal: options.signal,
+    }
   );
 };
+
+// =====================================================
+// GET JOB ANALYTICS
+// =====================================================
 
 export const getJobAnalytics = async (
   jobId,
@@ -333,45 +297,31 @@ export const getJobAnalytics = async (
     throw new Error("Job ID is required.");
   }
 
-  return get(
+  return request(
     `${API_CONFIG.JOBS_URL}/${encodeURIComponent(jobId)}/analytics`,
-    options
+    {
+      method: "GET",
+      cache: "no-store",
+      signal: options.signal,
+    }
   );
 };
 
-// Alias retained for compatibility with earlier components.
-export const getProcessingResults = async (jobId) =>
-  getJobAnalytics(jobId);
+export const getProcessingResults = getJobAnalytics;
 
-
-// ----------------------------------------------------------
-// 9. POLL A JOB AND REPORT EVERY STATUS RESPONSE
-// ----------------------------------------------------------
-
-const sleep = (milliseconds) =>
-  new Promise((resolve) =>
-    setTimeout(resolve, milliseconds)
-  );
-
-/**
- * Polls the job-status endpoint.
- *
- * onUpdate receives the complete status object on every
- * successful poll, including latest_frame and recent_activity.
- *
- * onProgress receives:
- * (percentage, completeStatusObject)
- */
+// =====================================================
+// POLL JOB UNTIL COMPLETED
+// =====================================================
 
 export const pollVideoJob = async (
   jobId,
   {
-    onUpdate = null,
-    onProgress = null,
+    onUpdate,
+    onProgress,
     pollIntervalMs = API_CONFIG.POLL_INTERVAL_MS,
     maxWaitMs = API_CONFIG.MAX_JOB_WAIT_MS,
     signal,
-    maxConsecutiveErrors = 10,
+    maxConsecutiveErrors = 12,
   } = {}
 ) => {
   if (!jobId) {
@@ -379,41 +329,35 @@ export const pollVideoJob = async (
   }
 
   const startedAt = Date.now();
-  let consecutiveErrors = 0;
+  let errors = 0;
 
   while (Date.now() - startedAt < maxWaitMs) {
     if (signal?.aborted) {
       throw new DOMException(
-        "Job polling was cancelled.",
+        "Polling cancelled.",
         "AbortError"
       );
     }
 
     try {
-      const status = await getJobStatus(jobId, { signal });
-
-      consecutiveErrors = 0;
-
-      if (typeof onUpdate === "function") {
-        onUpdate(status);
-      }
-
-      const percentage = Math.max(
-        0,
-        Math.min(100, Number(status.progress) || 0)
+      const status = await getJobStatus(
+        jobId,
+        { signal }
       );
 
-      if (typeof onProgress === "function") {
-        onProgress(percentage, status);
-      }
+      errors = 0;
+
+      onUpdate?.(status);
+
+      onProgress?.(
+        Math.max(
+          0,
+          Math.min(100, Number(status.progress) || 0)
+        ),
+        status
+      );
 
       if (status.status === "completed") {
-        if (!status.result?.success) {
-          throw new Error(
-            "The job completed, but the backend did not return a valid result."
-          );
-        }
-
         return status;
       }
 
@@ -423,8 +367,8 @@ export const pollVideoJob = async (
       ) {
         throw new Error(
           status.error ||
-            status.message ||
-            `Video job ${status.status}.`
+          status.message ||
+          `Job ${status.status}.`
         );
       }
     } catch (error) {
@@ -432,104 +376,46 @@ export const pollVideoJob = async (
         throw error;
       }
 
-      // A failed job is a terminal application error,
-      // not a transient polling error.
-
       if (
-        error.message &&
-        !error.message.startsWith("Request failed with HTTP 5") &&
-        !error.message.startsWith("Failed to fetch") &&
-        !error.message.includes("NetworkError") &&
-        !error.message.includes("network") &&
-        !error.message.includes("Load failed")
+        ["failed", "cancelled"].includes(
+          error.response?.status
+        )
       ) {
         throw error;
       }
 
-      consecutiveErrors += 1;
+      if (
+        error.status === 404 ||
+        error.status === 400 ||
+        error.status === 422
+      ) {
+        throw error;
+      }
 
-      console.warn(
-        `Job status request failed (${consecutiveErrors}/${maxConsecutiveErrors}):`,
-        error
-      );
+      errors += 1;
 
-      if (consecutiveErrors >= maxConsecutiveErrors) {
+      if (errors >= maxConsecutiveErrors) {
         throw new Error(
-          `Unable to retrieve job progress after ${maxConsecutiveErrors} attempts. The job may still be running. Job ID: ${jobId}. Check Render before submitting the video again.`
+          `Unable to retrieve job status after ${maxConsecutiveErrors} attempts. ` +
+          `The job may still be running. Job ID: ${jobId}. ` +
+          "Check Render before resubmitting."
         );
       }
     }
 
-    await sleep(pollIntervalMs);
-  }
-
-  throw new Error(
-    `Video processing exceeded the maximum wait time. Job ID: ${jobId}. Check its status before uploading the same video again.`
-  );
-};
-
-
-// ----------------------------------------------------------
-// 10. PROCESS VIDEO (CREATE JOB + LIVE POLLING)
-// ----------------------------------------------------------
-
-/**
- * Backward-compatible helper.
- *
- * onProgress is called as:
- * onProgress(percent, jobStatus).
- *
- * onUpdate is called with the complete status object
- * every successful poll.
- */
-
-export const processVideo = async (
-  file,
-  confidence = 0.35,
-  frameInterval = 1,
-  onProgress = null,
-  options = {}
-) => {
-  const created = await createVideoJob(
-    file,
-    confidence,
-    frameInterval,
-    options
-  );
-
-  if (typeof onProgress === "function") {
-    onProgress(
-      Number(created.progress) || 0,
-      created
+    await new Promise((resolve) =>
+      window.setTimeout(resolve, pollIntervalMs)
     );
   }
 
-  const completedStatus = await pollVideoJob(
-    created.job_id,
-    {
-      ...options,
-      onProgress,
-      onUpdate: options.onUpdate,
-    }
+  throw new Error(
+    `Polling timed out. Check job ${jobId} on the backend before resubmitting.`
   );
-
-  const result = completedStatus.result;
-
-  return {
-    ...result,
-    job_id: created.job_id,
-    video_url: getFileUrl(result.video_url),
-    csv_url: getFileUrl(result.csv_url),
-    json_url: getFileUrl(result.json_url),
-    analytics: result.analytics || result.summary || {},
-    summary: result.summary || result.analytics || {},
-  };
 };
 
-
-// ----------------------------------------------------------
-// 11. FILE URL HELPER
-// ----------------------------------------------------------
+// =====================================================
+// OUTPUT FILE URL
+// =====================================================
 
 export const getFileUrl = (url) => {
   if (!url) return null;
@@ -543,20 +429,21 @@ export const getFileUrl = (url) => {
   }${url}`;
 };
 
-
-// ----------------------------------------------------------
-// 12. DOWNLOAD HELPER
-// ----------------------------------------------------------
+// =====================================================
+// DOWNLOAD FILE
+// =====================================================
 
 export const downloadFile = async (
-  fileUrl,
+  url,
   filename = "download"
 ) => {
-  if (!fileUrl) {
+  const resolvedUrl = getFileUrl(url);
+
+  if (!resolvedUrl) {
     throw new Error("Download URL is not available.");
   }
 
-  const response = await fetch(getFileUrl(fileUrl));
+  const response = await fetch(resolvedUrl);
 
   if (!response.ok) {
     throw new Error(
@@ -565,29 +452,32 @@ export const downloadFile = async (
   }
 
   const blob = await response.blob();
+
   const objectUrl = URL.createObjectURL(blob);
-  const link = document.createElement("a");
 
-  try {
-    link.href = objectUrl;
-    link.download = filename;
+  const anchor = document.createElement("a");
 
-    document.body.appendChild(link);
-    link.click();
-  } finally {
-    link.remove();
+  anchor.href = objectUrl;
+  anchor.download = filename;
 
-    window.setTimeout(
-      () => URL.revokeObjectURL(objectUrl),
-      1500
-    );
-  }
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+
+  window.setTimeout(
+    () => URL.revokeObjectURL(objectUrl),
+    1500
+  );
 };
+
+// =====================================================
+// DOWNLOAD SPECIFIC OUTPUTS
+// =====================================================
 
 export const downloadProcessedVideo = (url) =>
   downloadFile(
     url,
-    "pragyanai_people_detection.mp4"
+    "pragyanai_people_detection_processed.mp4"
   );
 
 export const downloadCSVReport = (url) =>
@@ -602,56 +492,50 @@ export const downloadJSONReport = (url) =>
     "pragyanai_people_analytics.json"
   );
 
+// =====================================================
+// OUTPUT FILE MANAGEMENT
+// =====================================================
 
-// ----------------------------------------------------------
-// 13. OUTPUT FILE MANAGEMENT
-// ----------------------------------------------------------
+export const getOutputFiles = () =>
+  request(API_CONFIG.OUTPUTS_URL, {
+    method: "GET",
+    cache: "no-store",
+  });
 
-export const getOutputFiles = async () =>
-  get(API_CONFIG.OUTPUTS_URL);
-
-export const deleteOutputFile = async (filename) => {
-  if (!filename) {
-    throw new Error("Filename is required.");
-  }
-
-  const response = await fetch(
+export const deleteOutputFile = (filename) =>
+  request(
     `${API_CONFIG.OUTPUTS_URL}/${encodeURIComponent(filename)}`,
     {
       method: "DELETE",
-      headers: {
-        Accept: "application/json",
-      },
     }
   );
 
-  return parseResponse(response);
-};
-
-
-// ----------------------------------------------------------
-// 14. DEFAULT EXPORT
-// ----------------------------------------------------------
+// =====================================================
+// DEFAULT API EXPORT
+// =====================================================
 
 const api = {
   API_CONFIG,
   parseResponse,
+
   healthCheck,
   getBackendStatus,
-  testBackendConnection,
   getModelInfo,
+
   validateVideoFile,
   createVideoJob,
+
   getJobStatus,
   getJobAnalytics,
-  pollVideoJob,
-  processVideo,
   getProcessingResults,
+  pollVideoJob,
+
   getFileUrl,
   downloadFile,
   downloadProcessedVideo,
   downloadCSVReport,
   downloadJSONReport,
+
   getOutputFiles,
   deleteOutputFile,
 };
