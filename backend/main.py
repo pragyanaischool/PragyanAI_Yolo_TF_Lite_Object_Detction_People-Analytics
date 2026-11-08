@@ -22,6 +22,7 @@ import os
 import json
 import uuid
 import logging
+import time
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -50,8 +51,11 @@ from utils.video_utils import (
 # =========================================================
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format=(
+        "%(asctime)s | %(levelname)s | %(name)s | "
+        "%(message)s"
+    ),
 )
 
 logger = logging.getLogger("pragyanai")
@@ -149,7 +153,15 @@ async def lifespan(app: FastAPI):
     logger.info("Starting PragyanAI People Detection Backend")
     logger.info("=" * 60)
 
+    startup_started = time.perf_counter()
+
     logger.info("Model path: %s", MODEL_PATH)
+    logger.info("Upload directory: %s", UPLOAD_DIR)
+    logger.info("Output directory: %s", OUTPUT_DIR)
+    logger.info("Frontend origin: %s", FRONTEND_ORIGIN)
+    logger.info("Maximum upload size: %s bytes", MAX_UPLOAD_SIZE)
+    logger.info("Python process PID: %s", os.getpid())
+    logger.info("Model file exists: %s", MODEL_PATH.is_file())
 
     try:
 
@@ -158,7 +170,8 @@ async def lifespan(app: FastAPI):
                 f"YOLO model not found: {MODEL_PATH}"
             )
 
-        logger.info("Loading YOLO11 TFLite model...")
+        logger.info("[STARTUP 1/2] Loading YOLO11 TFLite model...")
+        model_load_started = time.perf_counter()
 
         processor = await run_in_threadpool(
             VideoProcessor,
@@ -171,7 +184,8 @@ async def lifespan(app: FastAPI):
         app.state.processor = processor
 
         logger.info(
-            "YOLO11 model loaded successfully."
+            "[STARTUP 2/2] YOLO11 model loaded successfully in %.2f seconds.",
+            time.perf_counter() - model_load_started,
         )
 
     except Exception as exc:
@@ -186,7 +200,11 @@ async def lifespan(app: FastAPI):
             "Failed to initialize YOLO11 model."
         )
 
-    logger.info("Backend startup completed.")
+    logger.info(
+        "Backend startup completed in %.2f seconds | model_loaded=%s",
+        time.perf_counter() - startup_started,
+        model_loaded,
+    )
 
     yield
 
@@ -228,6 +246,46 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# =========================================================
+# HTTP REQUEST LOGGING
+# =========================================================
+
+@app.middleware("http")
+async def request_logging_middleware(request, call_next):
+    request_started = time.perf_counter()
+    client_host = request.client.host if request.client else "unknown"
+
+    logger.info(
+        "[HTTP REQUEST] method=%s path=%s client=%s",
+        request.method,
+        request.url.path,
+        client_host,
+    )
+
+    try:
+        response = await call_next(request)
+        elapsed = time.perf_counter() - request_started
+
+        logger.info(
+            "[HTTP RESPONSE] method=%s path=%s status=%s duration=%.3fs",
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed,
+        )
+        return response
+
+    except Exception:
+        elapsed = time.perf_counter() - request_started
+        logger.exception(
+            "[HTTP ERROR] method=%s path=%s duration=%.3fs",
+            request.method,
+            request.url.path,
+            elapsed,
+        )
+        raise
 
 
 # =========================================================
@@ -448,7 +506,19 @@ async def process_video(
         Analytics summary
     """
 
+    request_started = time.perf_counter()
     input_path = None
+    job_id = None
+    current_stage = "request_received"
+    uploaded_size = 0
+
+    logger.info("=" * 72)
+    logger.info(
+        "[PROCESS REQUEST] filename=%s confidence=%.3f frame_interval=%s",
+        file.filename,
+        confidence,
+        frame_interval,
+    )
 
     try:
 
@@ -456,7 +526,15 @@ async def process_video(
         # 1. CHECK MODEL AVAILABILITY
         # -------------------------------------------------
 
+        current_stage = "check_model"
+        logger.info("[JOB STAGE] Checking model availability")
+
         current_processor = get_current_processor()
+
+        logger.info(
+            "[MODEL STATUS] Model is ready | processor=%s",
+            type(current_processor).__name__,
+        )
 
         # -------------------------------------------------
         # 2. VALIDATE REQUEST PARAMETERS
@@ -478,6 +556,12 @@ async def process_video(
                 ),
             )
 
+        logger.info(
+            "[REQUEST SETTINGS] confidence=%.3f frame_interval=%s",
+            confidence,
+            frame_interval,
+        )
+
         # -------------------------------------------------
         # 3. VALIDATE FILE EXTENSION
         # -------------------------------------------------
@@ -489,6 +573,13 @@ async def process_video(
         extension = Path(
             original_filename
         ).suffix.lower()
+
+        current_stage = "validate_file_extension"
+        logger.info(
+            "[FILE VALIDATION] filename=%s extension=%s",
+            original_filename,
+            extension,
+        )
 
         if extension not in ALLOWED_EXTENSIONS:
             raise HTTPException(
@@ -527,16 +618,27 @@ async def process_video(
         csv_path = OUTPUT_DIR / csv_filename
         json_path = OUTPUT_DIR / json_filename
 
+        logger.info(
+            "[JOB CREATED] job_id=%s input=%s output=%s",
+            job_id,
+            input_path.name,
+            output_path.name,
+        )
+
         # -------------------------------------------------
         # 5. SAVE UPLOADED VIDEO
         # -------------------------------------------------
 
+        current_stage = "upload_video"
+        upload_started = time.perf_counter()
+
         logger.info(
-            "Receiving video: %s",
+            "[UPLOAD START] job_id=%s filename=%s",
+            job_id,
             original_filename,
         )
 
-        uploaded_size = 0
+        last_upload_log_size = 0
 
         with open(input_path, "wb") as destination:
 
@@ -561,6 +663,15 @@ async def process_video(
 
                 destination.write(chunk)
 
+                # Emit upload progress at approximately every 10 MB.
+                if uploaded_size - last_upload_log_size >= 10 * 1024 * 1024:
+                    logger.info(
+                        "[UPLOAD PROGRESS] job_id=%s uploaded=%.2f MB",
+                        job_id,
+                        uploaded_size / (1024 * 1024),
+                    )
+                    last_upload_log_size = uploaded_size
+
         if uploaded_size == 0:
 
             raise HTTPException(
@@ -569,13 +680,19 @@ async def process_video(
             )
 
         logger.info(
-            "Video uploaded successfully. Size: %.2f MB",
+            "[UPLOAD COMPLETE] job_id=%s size=%.2f MB duration=%.2fs",
+            job_id,
             uploaded_size / (1024 * 1024),
+            time.perf_counter() - upload_started,
         )
 
         # -------------------------------------------------
         # 6. VALIDATE VIDEO USING OPENCV
         # -------------------------------------------------
+
+        current_stage = "validate_video"
+        validation_started = time.perf_counter()
+        logger.info("[VALIDATION START] job_id=%s", job_id)
 
         try:
 
@@ -586,22 +703,39 @@ async def process_video(
 
         except VideoValidationError as exc:
 
+            logger.warning(
+                "[VALIDATION FAILED] job_id=%s error=%s",
+                job_id,
+                exc,
+            )
             raise HTTPException(
                 status_code=400,
                 detail=str(exc),
             )
 
         logger.info(
-            "Video validation successful: %s",
+            "[VALIDATION COMPLETE] job_id=%s metadata=%s duration=%.2fs",
+            job_id,
             video_info,
+            time.perf_counter() - validation_started,
         )
 
         # -------------------------------------------------
         # 7. PROCESS VIDEO
         # -------------------------------------------------
 
+        current_stage = "yolo_bytetrack_processing"
+        processing_started = time.perf_counter()
+
         logger.info(
-            "Starting YOLO11 + ByteTrack processing."
+            "[INFERENCE START] job_id=%s engine=YOLO11 runtime=LiteRT tracker=ByteTrack",
+            job_id,
+        )
+        logger.info(
+            "[INFERENCE INPUT] video=%s confidence=%.3f frame_interval=%s",
+            input_path.name,
+            confidence,
+            frame_interval,
         )
 
         analytics_result = await run_in_threadpool(
@@ -614,18 +748,32 @@ async def process_video(
         )
 
         logger.info(
-            "Video processing completed."
+            "[INFERENCE COMPLETE] job_id=%s duration=%.2fs analytics_type=%s",
+            job_id,
+            time.perf_counter() - processing_started,
+            type(analytics_result).__name__,
         )
 
         # -------------------------------------------------
         # 8. VERIFY OUTPUT FILES
         # -------------------------------------------------
 
+        current_stage = "verify_output_files"
+        logger.info("[OUTPUT VERIFY] job_id=%s checking generated files", job_id)
+
         if not output_path.exists():
 
             raise RuntimeError(
                 "Video processor did not generate output video."
             )
+
+        output_size = output_path.stat().st_size
+        logger.info(
+            "[OUTPUT VIDEO] job_id=%s path=%s size=%.2f MB",
+            job_id,
+            output_path.name,
+            output_size / (1024 * 1024),
+        )
 
         if output_path.stat().st_size == 0:
 
@@ -636,12 +784,22 @@ async def process_video(
         if not csv_path.exists():
 
             logger.warning(
-                "CSV analytics file was not generated."
+                "[OUTPUT WARNING] job_id=%s CSV analytics file was not generated",
+                job_id,
+            )
+        else:
+            logger.info(
+                "[OUTPUT CSV] job_id=%s path=%s size=%s bytes",
+                job_id,
+                csv_path.name,
+                csv_path.stat().st_size,
             )
 
         # -------------------------------------------------
         # 9. BUILD ANALYTICS JSON
         # -------------------------------------------------
+
+        current_stage = "generate_analytics_json"
 
         if not isinstance(analytics_result, dict):
 
@@ -672,6 +830,13 @@ async def process_video(
                 indent=4,
                 default=str,
             )
+
+        logger.info(
+            "[OUTPUT JSON] job_id=%s path=%s size=%s bytes",
+            job_id,
+            json_path.name,
+            json_path.stat().st_size,
+        )
 
         # -------------------------------------------------
         # 10. GENERATE PUBLIC URLS
@@ -719,20 +884,56 @@ async def process_video(
             },
         }
 
+        total_duration = time.perf_counter() - request_started
+
         logger.info(
-            "Job %s completed successfully.",
+            "[JOB SUCCESS] job_id=%s total_duration=%.2fs "
+            "video_size=%.2f MB csv_created=%s json_created=%s",
             job_id,
+            total_duration,
+            output_path.stat().st_size / (1024 * 1024),
+            csv_path.exists(),
+            json_path.exists(),
         )
+        logger.info(
+            "[JOB RESPONSE] job_id=%s video_url=%s csv_url=%s json_url=%s",
+            job_id,
+            video_url,
+            csv_url,
+            json_url,
+        )
+        logger.info(
+            "[JOB ANALYTICS SUMMARY] job_id=%s unique_people=%s "
+            "total_detections=%s processed_frames=%s processing_time=%s",
+            job_id,
+            analytics_result.get("unique_people",
+                                 analytics_result.get("total_unique_people")),
+            analytics_result.get("total_detections"),
+            analytics_result.get("processed_frames"),
+            analytics_result.get("processing_time"),
+        )
+        logger.info("=" * 72)
 
         return response
 
-    except HTTPException:
+    except HTTPException as exc:
+        logger.warning(
+            "[JOB HTTP ERROR] job_id=%s stage=%s status=%s detail=%s "
+            "elapsed=%.2fs",
+            job_id,
+            current_stage,
+            exc.status_code,
+            exc.detail,
+            time.perf_counter() - request_started,
+        )
         raise
 
     except VideoValidationError as exc:
 
         logger.exception(
-            "Video validation failed."
+            "[JOB VALIDATION ERROR] job_id=%s stage=%s",
+            job_id,
+            current_stage,
         )
 
         raise HTTPException(
@@ -743,7 +944,11 @@ async def process_video(
     except Exception as exc:
 
         logger.exception(
-            "Video processing failed."
+            "[JOB FAILED] job_id=%s stage=%s elapsed=%.2fs error=%s",
+            job_id,
+            current_stage,
+            time.perf_counter() - request_started,
+            exc,
         )
 
         raise HTTPException(
@@ -759,7 +964,20 @@ async def process_video(
         # Delete temporary uploaded input.
         cleanup_file(input_path)
 
-        await file.close()
+        try:
+            await file.close()
+        except Exception:
+            logger.exception(
+                "[CLEANUP ERROR] job_id=%s unable to close upload",
+                job_id,
+            )
+
+        logger.info(
+            "[JOB CLEANUP] job_id=%s input_removed=%s total_elapsed=%.2fs",
+            job_id,
+            not (input_path and input_path.exists()),
+            time.perf_counter() - request_started,
+        )
 
 
 # =========================================================
@@ -769,6 +987,7 @@ async def process_video(
 @app.get("/api/outputs")
 async def list_outputs():
 
+    logger.info("[OUTPUT LIST] Listing files in %s", OUTPUT_DIR)
     files = []
 
     for path in OUTPUT_DIR.iterdir():
@@ -780,6 +999,8 @@ async def list_outputs():
                 "size_bytes": path.stat().st_size,
                 "url": get_public_url(path),
             })
+
+    logger.info("[OUTPUT LIST COMPLETE] total_files=%s", len(files))
 
     return {
         "success": True,
@@ -822,7 +1043,9 @@ async def delete_output(filename: str):
 
     try:
 
+        logger.info("[OUTPUT DELETE] filename=%s", safe_name)
         target_path.unlink()
+        logger.info("[OUTPUT DELETE COMPLETE] filename=%s", safe_name)
 
         return {
             "success": True,
@@ -856,3 +1079,4 @@ if __name__ == "__main__":
         port=int(os.getenv("PORT", 8000)),
         reload=True,
     )
+    
