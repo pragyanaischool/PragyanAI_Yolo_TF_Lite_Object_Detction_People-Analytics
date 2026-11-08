@@ -1,514 +1,323 @@
-
 import os
 import uuid
-import shutil
-import threading
-import subprocess
+import logging
+import asyncio
 from pathlib import Path
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager
 
 import cv2
-import pandas as pd
-import imageio_ffmpeg
 
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import (
+    FastAPI,
+    UploadFile,
+    File,
+    Form,
+    HTTPException,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 
-from ultralytics import YOLO
+from services.video_processor import VideoProcessor
 
 
 # ============================================================
-# 1. CONFIGURATION
+# 1. LOGGING CONFIGURATION
+# ============================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
+logger = logging.getLogger("PragyanAI")
+
+
+# ============================================================
+# 2. ENVIRONMENT CONFIGURATION
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 
 MODEL_PATH = Path(
-    os.getenv("MODEL_PATH", "models/yolo11n.tflite")
+    os.getenv(
+        "MODEL_PATH",
+        str(BASE_DIR / "models" / "yolo11n.tflite"),
+    )
 )
 
-if not MODEL_PATH.is_absolute():
-    MODEL_PATH = BASE_DIR / MODEL_PATH
-
 UPLOAD_DIR = Path(
-    os.getenv("UPLOAD_DIR", "/tmp/pragyanai_uploads")
+    os.getenv(
+        "UPLOAD_DIR",
+        "/tmp/pragyanai_uploads",
+    )
 )
 
 OUTPUT_DIR = Path(
-    os.getenv("OUTPUT_DIR", "/tmp/pragyanai_outputs")
+    os.getenv(
+        "OUTPUT_DIR",
+        "/tmp/pragyanai_outputs",
+    )
 )
 
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+MAX_UPLOAD_SIZE = int(
+    os.getenv(
+        "MAX_UPLOAD_SIZE",
+        str(500 * 1024 * 1024),
+    )
+)
 
-MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
+PUBLIC_API_URL = os.getenv(
+    "PUBLIC_API_URL",
+    "",
+).rstrip("/")
+
+FRONTEND_ORIGIN = os.getenv(
+    "FRONTEND_ORIGIN",
+    "",
+)
 
 ALLOWED_EXTENSIONS = {
     ".mp4",
     ".avi",
     ".mov",
     ".mkv",
-    ".webm"
+    ".webm",
 }
+
+# Create required directories
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
-# 2. FASTAPI APPLICATION
+# 3. CORS CONFIGURATION
+# ============================================================
+
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+if FRONTEND_ORIGIN:
+    origins.extend(
+        origin.strip().rstrip("/")
+        for origin in FRONTEND_ORIGIN.split(",")
+        if origin.strip()
+    )
+
+# Remove duplicate origins
+origins = list(dict.fromkeys(origins))
+
+logger.info("Allowed CORS origins: %s", origins)
+
+
+# ============================================================
+# 4. GLOBAL PROCESSOR
+# ============================================================
+
+video_processor = None
+model_error = None
+
+
+# ============================================================
+# 5. APPLICATION LIFESPAN
+# ============================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global video_processor
+    global model_error
+
+    logger.info("Starting PragyanAI People Detection API")
+
+    try:
+        if not MODEL_PATH.exists():
+            raise FileNotFoundError(
+                f"YOLO TFLite model not found: {MODEL_PATH}"
+            )
+
+        logger.info("Loading model: %s", MODEL_PATH)
+
+        # VideoProcessor must support model_path.
+        video_processor = VideoProcessor(
+            model_path=str(MODEL_PATH)
+        )
+
+        model_error = None
+
+        logger.info("Detection engine initialized successfully")
+
+    except Exception as error:
+        video_processor = None
+        model_error = str(error)
+
+        logger.exception(
+            "Failed to initialize detection engine"
+        )
+
+    yield
+
+    logger.info("Shutting down PragyanAI API")
+
+    video_processor = None
+
+
+# ============================================================
+# 6. FASTAPI APPLICATION
 # ============================================================
 
 app = FastAPI(
     title="PragyanAI People Detection & Counting API",
     description=(
         "YOLO11 TFLite based people detection, "
-        "tracking, counting and video analytics."
+        "ByteTrack tracking and video analytics API."
     ),
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
-frontend_origin = os.getenv(
-    "FRONTEND_ORIGIN",
-    "http://localhost:5173"
-)
 
-allowed_origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://tflite-objectdetection-peopleanalysis.netlify.app/",
-    frontend_origin.rstrip("/")
-]
+# ============================================================
+# 7. ADD CORS MIDDLEWARE
+# ============================================================
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(set(allowed_origins)),
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
+
+
+# ============================================================
+# 8. STATIC OUTPUT DIRECTORY
+# ============================================================
 
 app.mount(
     "/outputs",
     StaticFiles(directory=str(OUTPUT_DIR)),
-    name="outputs"
+    name="outputs",
 )
 
 
 # ============================================================
-# 3. LOAD YOLO TFLITE MODEL
+# 9. HELPER FUNCTIONS
 # ============================================================
 
-if not MODEL_PATH.exists():
-    raise FileNotFoundError(
-        f"YOLO TFLite model not found: {MODEL_PATH}"
-    )
+def get_public_url(relative_path: str) -> str:
+    """
+    Convert a relative output path into a public URL.
+    """
 
-print("Loading YOLO model:", MODEL_PATH)
+    if PUBLIC_API_URL:
+        return f"{PUBLIC_API_URL}{relative_path}"
 
-model = YOLO(str(MODEL_PATH))
+    return relative_path
 
-# Prevent simultaneous access to the same tracking model.
-model_lock = threading.Lock()
 
+def validate_video_file(filename: str):
+    """
+    Validate uploaded video filename and extension.
+    """
 
-# ============================================================
-# 4. HEALTH CHECK
-# ============================================================
-
-@app.get("/")
-def home():
-
-    return {
-        "application": "PragyanAI People Detection System",
-        "status": "Running",
-        "version": "1.0.0",
-        "model": MODEL_PATH.name
-    }
-
-
-@app.get("/health")
-def health():
-
-    return {
-        "status": "healthy",
-        "model_exists": MODEL_PATH.exists(),
-        "model_name": MODEL_PATH.name
-    }
-
-
-# ============================================================
-# 5. TRACKER RESET
-# ============================================================
-
-def reset_tracker():
-
-    predictor = getattr(model, "predictor", None)
-
-    if predictor is None:
-        return
-
-    trackers = getattr(predictor, "trackers", [])
-
-    for tracker in trackers:
-        try:
-            tracker.reset()
-        except Exception:
-            pass
-
-
-# ============================================================
-# 6. VIDEO PROCESSING
-# ============================================================
-
-def process_video(
-    input_path,
-    output_path,
-    csv_path,
-    confidence=0.25,
-    frame_interval=1
-):
-
-    cap = cv2.VideoCapture(str(input_path))
-
-    if not cap.isOpened():
-        raise ValueError("Unable to open uploaded video.")
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-
-    if not fps or fps <= 0:
-        fps = 25.0
-
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    total_frames = int(
-        cap.get(cv2.CAP_PROP_FRAME_COUNT)
-    )
-
-    if width <= 0 or height <= 0:
-        cap.release()
-        raise ValueError("Invalid video dimensions.")
-
-    frame_interval = max(1, int(frame_interval))
-
-    # Temporary video writer.
-    temp_video = output_path.with_name(
-        output_path.stem + "_temp.mp4"
-    )
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-
-    writer = cv2.VideoWriter(
-        str(temp_video),
-        fourcc,
-        fps,
-        (width, height)
-    )
-
-    if not writer.isOpened():
-        cap.release()
-        raise ValueError("Unable to create output video.")
-
-    frame_number = 0
-    processed_frames = 0
-    total_detections = 0
-
-    unique_person_ids = set()
-    analytics_rows = []
-
-    max_people = 0
-    total_people_observed = 0
-
-    start_time = datetime.now(timezone.utc)
-
-    try:
-
-        with model_lock:
-
-            reset_tracker()
-
-            while True:
-
-                ret, frame = cap.read()
-
-                if not ret:
-                    break
-
-                frame_number += 1
-
-                current_people = 0
-                tracked_ids = []
-                annotated_frame = frame.copy()
-
-                # ------------------------------------------------
-                # Run inference on selected frames.
-                # ------------------------------------------------
-
-                if (frame_number - 1) % frame_interval == 0:
-
-                    results = model.track(
-                        frame,
-                        persist=True,
-                        tracker="bytetrack.yaml",
-                        classes=[0],
-                        conf=float(confidence),
-                        imgsz=640,
-                        verbose=False
-                    )
-
-                    result = results[0]
-
-                    annotated_frame = result.plot()
-
-                    if result.boxes is not None:
-
-                        current_people = len(result.boxes)
-
-                        total_detections += current_people
-
-                        if result.boxes.id is not None:
-
-                            ids = (
-                                result.boxes.id
-                                .cpu()
-                                .numpy()
-                                .astype(int)
-                            )
-
-                            tracked_ids = ids.tolist()
-
-                            unique_person_ids.update(
-                                tracked_ids
-                            )
-
-                    processed_frames += 1
-
-                    total_people_observed += current_people
-
-                    max_people = max(
-                        max_people,
-                        current_people
-                    )
-
-                    analytics_rows.append({
-
-                        "frame": frame_number,
-
-                        "timestamp_seconds": round(
-                            (frame_number - 1) / fps,
-                            3
-                        ),
-
-                        "people_detected": current_people,
-
-                        "tracked_person_ids": ",".join(
-                            map(str, tracked_ids)
-                        )
-
-                    })
-
-                    # Overlay analytics.
-                    cv2.rectangle(
-                        annotated_frame,
-                        (10, 10),
-                        (440, 115),
-                        (0, 0, 0),
-                        -1
-                    )
-
-                    cv2.putText(
-                        annotated_frame,
-                        f"People Detected: {current_people}",
-                        (25, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8,
-                        (0, 255, 0),
-                        2
-                    )
-
-                    cv2.putText(
-                        annotated_frame,
-                        f"Unique IDs: {len(unique_person_ids)}",
-                        (25, 75),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 255, 255),
-                        2
-                    )
-
-                    cv2.putText(
-                        annotated_frame,
-                        f"Frame: {frame_number}",
-                        (25, 105),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (255, 255, 255),
-                        1
-                    )
-
-                else:
-
-                    # Preserve the original video frame.
-                    cv2.putText(
-                        annotated_frame,
-                        "Inference skipped",
-                        (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 165, 255),
-                        2
-                    )
-
-                writer.write(annotated_frame)
-
-    finally:
-
-        cap.release()
-        writer.release()
-
-    # ------------------------------------------------------------
-    # Convert temporary video to browser-compatible H.264 MP4.
-    # ------------------------------------------------------------
-
-    ffmpeg_executable = imageio_ffmpeg.get_ffmpeg_exe()
-
-    command = [
-        ffmpeg_executable,
-        "-y",
-        "-i", str(temp_video),
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-preset", "fast",
-        "-movflags", "+faststart",
-        str(output_path)
-    ]
-
-    conversion = subprocess.run(
-        command,
-        capture_output=True,
-        text=True
-    )
-
-    if conversion.returncode != 0:
-        raise RuntimeError(
-            "Video conversion failed: "
-            + conversion.stderr[-2000:]
-        )
-
-    if temp_video.exists():
-        temp_video.unlink()
-
-    # ------------------------------------------------------------
-    # Generate CSV analytics.
-    # ------------------------------------------------------------
-
-    df = pd.DataFrame(analytics_rows)
-
-    df.to_csv(csv_path, index=False)
-
-    processing_time = (
-        datetime.now(timezone.utc) - start_time
-    ).total_seconds()
-
-    average_people = (
-        total_people_observed / processed_frames
-        if processed_frames > 0 else 0
-    )
-
-    summary = {
-
-        "total_frames": total_frames,
-
-        "processed_frames": processed_frames,
-
-        "frame_interval": frame_interval,
-
-        "total_detections": total_detections,
-
-        "unique_people_tracked": len(unique_person_ids),
-
-        "maximum_people_in_frame": max_people,
-
-        "average_people_per_processed_frame": round(
-            average_people,
-            2
-        ),
-
-        "video_fps": round(fps, 2),
-
-        "video_width": width,
-
-        "video_height": height,
-
-        "video_duration_seconds": round(
-            total_frames / fps,
-            2
-        ),
-
-        "processing_time_seconds": round(
-            processing_time,
-            2
-        )
-
-    }
-
-    return summary
-
-
-# ============================================================
-# 7. VIDEO UPLOAD AND PROCESS API
-# ============================================================
-
-@app.post("/api/process")
-async def process_uploaded_video(
-
-    file: UploadFile = File(...),
-
-    confidence: float = Form(0.25),
-
-    frame_interval: int = Form(1)
-
-):
-
-    if not file.filename:
+    if not filename:
         raise HTTPException(
             status_code=400,
-            detail="No video filename provided."
+            detail="No video filename received.",
         )
 
-    extension = Path(file.filename).suffix.lower()
+    extension = Path(filename).suffix.lower()
 
     if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail="Unsupported video format."
+            detail=(
+                f"Unsupported video format: {extension}. "
+                "Supported formats: MP4, AVI, MOV, MKV, WEBM."
+            ),
         )
 
-    if not 0.05 <= confidence <= 0.95:
+    return extension
+
+
+def validate_video_content(video_path: Path):
+    """
+    Check whether OpenCV can open the uploaded video.
+    """
+
+    cap = cv2.VideoCapture(str(video_path))
+
+    if not cap.isOpened():
+        cap.release()
+
         raise HTTPException(
             status_code=400,
-            detail="Confidence must be between 0.05 and 0.95."
+            detail=(
+                "Invalid video file. OpenCV could not open "
+                "the uploaded video."
+            ),
         )
 
-    if not 1 <= frame_interval <= 30:
+    frame_count = int(
+        cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    )
+
+    fps = float(
+        cap.get(cv2.CAP_PROP_FPS)
+    )
+
+    width = int(
+        cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    )
+
+    height = int(
+        cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    )
+
+    cap.release()
+
+    if frame_count <= 0:
         raise HTTPException(
             status_code=400,
-            detail="Frame interval must be between 1 and 30."
+            detail="Invalid video: no readable frames found.",
         )
 
-    job_id = str(uuid.uuid4())
+    if fps <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid video: unable to determine FPS.",
+        )
 
-    input_path = UPLOAD_DIR / f"{job_id}{extension}"
+    if width <= 0 or height <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid video dimensions.",
+        )
 
-    output_path = OUTPUT_DIR / f"{job_id}_annotated.mp4"
+    return {
+        "frame_count": frame_count,
+        "fps": fps,
+        "width": width,
+        "height": height,
+        "duration": frame_count / fps,
+    }
 
-    csv_path = OUTPUT_DIR / f"{job_id}_analytics.csv"
+
+async def save_uploaded_video(
+    file: UploadFile,
+    destination: Path,
+):
+    """
+    Save uploaded video in chunks.
+    Prevent uploads exceeding MAX_UPLOAD_SIZE.
+    """
+
+    total_size = 0
 
     try:
-
-        # Save uploaded video in chunks.
-        file_size = 0
-
-        with input_path.open("wb") as buffer:
+        with destination.open("wb") as buffer:
 
             while True:
 
@@ -517,57 +326,342 @@ async def process_uploaded_video(
                 if not chunk:
                     break
 
-                file_size += len(chunk)
+                total_size += len(chunk)
 
-                if file_size > MAX_UPLOAD_SIZE:
-
+                if total_size > MAX_UPLOAD_SIZE:
                     raise HTTPException(
                         status_code=413,
-                        detail="Video exceeds 500 MB limit."
+                        detail=(
+                            "Video exceeds the maximum "
+                            "upload size of 500 MB."
+                        ),
                     )
 
                 buffer.write(chunk)
 
-        if file_size == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Uploaded video is empty."
-            )
+    except Exception:
+        if destination.exists():
+            destination.unlink(missing_ok=True)
 
-        # Run video processing.
-        summary = process_video(
-            input_path=input_path,
-            output_path=output_path,
-            csv_path=csv_path,
-            confidence=confidence,
-            frame_interval=frame_interval
+        raise
+
+    if total_size == 0:
+        destination.unlink(missing_ok=True)
+
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded video is empty.",
         )
 
-        base_url = str(os.getenv("PUBLIC_API_URL", "")).rstrip("/")
+    return total_size
 
-        if not base_url:
-            # Works behind Render's proxy when forwarded headers
-            # are supplied; configure PUBLIC_API_URL for production.
-            base_url = ""
 
-        return {
+def normalize_analytics(result):
+    """
+    Normalize analytics returned by VideoProcessor.
+    """
 
-            "success": True,
+    if result is None:
+        return {}
 
-            "job_id": job_id,
+    if isinstance(result, dict):
+        return result
 
-            "summary": summary,
+    if hasattr(result, "to_dict"):
+        return result.to_dict()
 
-            "annotated_video_url": (
-                f"{base_url}/outputs/{output_path.name}"
-                if base_url else f"/outputs/{output_path.name}"
-            ),
+    if hasattr(result, "__dict__"):
+        return result.__dict__
 
-            "csv_url": (
-                f"{base_url}/outputs/{csv_path.name}"
-                if base_url else f"/outputs/{csv_path.name}"
+    return {"result": str(result)}
+
+
+# ============================================================
+# 10. ROOT ENDPOINT
+# ============================================================
+
+@app.get("/")
+async def root():
+
+    return {
+        "application": "PragyanAI People Detection & Counting",
+        "status": "running",
+        "version": "1.0.0",
+        "framework": "FastAPI",
+        "detection_engine": "YOLO11",
+        "tracking_engine": "ByteTrack",
+        "inference_runtime": "TensorFlow Lite",
+        "documentation": "/docs",
+        "health": "/health",
+    }
+
+
+# ============================================================
+# 11. HEALTH CHECK ENDPOINT
+# ============================================================
+
+@app.get("/health")
+async def health_check():
+
+    model_loaded = video_processor is not None
+
+    return {
+        "status": (
+            "healthy" if model_loaded else "degraded"
+        ),
+        "api": "running",
+        "model_loaded": model_loaded,
+        "model_path": str(MODEL_PATH),
+        "model_exists": MODEL_PATH.exists(),
+        "model_error": model_error,
+        "detection_engine": "YOLO11",
+        "tracking_engine": "ByteTrack",
+        "inference_runtime": "TensorFlow Lite",
+    }
+
+
+# ============================================================
+# 12. MODEL INFORMATION ENDPOINT
+# ============================================================
+
+@app.get("/api/model-info")
+async def model_info():
+
+    return {
+        "model_name": "YOLO11 Nano",
+        "model_file": MODEL_PATH.name,
+        "model_format": "TensorFlow Lite",
+        "model_loaded": video_processor is not None,
+        "detection_classes": ["person"],
+        "tracking_algorithm": "ByteTrack",
+        "confidence_default": 0.35,
+    }
+
+
+# ============================================================
+# 13. VIDEO PROCESSING ENDPOINT
+# ============================================================
+
+@app.post("/api/process")
+async def process_video(
+    file: UploadFile = File(...),
+    confidence: float = Form(0.35),
+    frame_interval: int = Form(1),
+):
+    """
+    Upload video and process it using YOLO11 TFLite
+    and ByteTrack.
+
+    Form fields:
+        file
+        confidence
+        frame_interval
+
+    Returns:
+        Processed video URL
+        CSV report URL
+        Analytics summary
+    """
+
+    input_path = None
+    output_path = None
+    csv_path = None
+
+    try:
+
+        # ----------------------------------------------------
+        # A. CHECK MODEL
+        # ----------------------------------------------------
+
+        if video_processor is None:
+
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Detection engine is not initialized. "
+                    f"Model error: {model_error}"
+                ),
             )
 
+        # ----------------------------------------------------
+        # B. VALIDATE PARAMETERS
+        # ----------------------------------------------------
+
+        if not 0.0 <= confidence <= 1.0:
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Confidence must be between 0.0 and 1.0."
+                ),
+            )
+
+        if frame_interval < 1 or frame_interval > 100:
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Frame interval must be between 1 and 100."
+                ),
+            )
+
+        # ----------------------------------------------------
+        # C. VALIDATE UPLOADED FILE
+        # ----------------------------------------------------
+
+        extension = validate_video_file(file.filename)
+
+        unique_id = uuid.uuid4().hex
+
+        input_path = UPLOAD_DIR / (
+            f"{unique_id}{extension}"
+        )
+
+        output_path = OUTPUT_DIR / (
+            f"{unique_id}_processed.mp4"
+        )
+
+        csv_path = OUTPUT_DIR / (
+            f"{unique_id}_analytics.csv"
+        )
+
+        logger.info(
+            "Received video: %s",
+            file.filename,
+        )
+
+        # ----------------------------------------------------
+        # D. SAVE UPLOADED FILE
+        # ----------------------------------------------------
+
+        file_size = await save_uploaded_video(
+            file,
+            input_path,
+        )
+
+        logger.info(
+            "Uploaded file size: %.2f MB",
+            file_size / (1024 * 1024),
+        )
+
+        # ----------------------------------------------------
+        # E. VALIDATE VIDEO CONTENT
+        # ----------------------------------------------------
+
+        video_info = await run_in_threadpool(
+            validate_video_content,
+            input_path,
+        )
+
+        logger.info(
+            "Video information: %s",
+            video_info,
+        )
+
+        # ----------------------------------------------------
+        # F. PROCESS VIDEO
+        # ----------------------------------------------------
+
+        logger.info(
+            "Starting YOLO11 detection and ByteTrack tracking"
+        )
+
+        analytics_result = await run_in_threadpool(
+            video_processor.process,
+            str(input_path),
+            str(output_path),
+            confidence,
+            frame_interval,
+            str(csv_path),
+        )
+
+        logger.info(
+            "Video processing completed"
+        )
+
+        # ----------------------------------------------------
+        # G. VERIFY OUTPUT FILES
+        # ----------------------------------------------------
+
+        if not output_path.exists():
+
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Video processing completed without "
+                    "creating the output video."
+                ),
+            )
+
+        if output_path.stat().st_size == 0:
+
+            raise HTTPException(
+                status_code=500,
+                detail="Processed video file is empty.",
+            )
+
+        # ----------------------------------------------------
+        # H. PREPARE ANALYTICS
+        # ----------------------------------------------------
+
+        analytics = normalize_analytics(
+            analytics_result
+        )
+
+        # ----------------------------------------------------
+        # I. PREPARE RESPONSE URLS
+        # ----------------------------------------------------
+
+        video_relative_url = (
+            f"/outputs/{output_path.name}"
+        )
+
+        csv_relative_url = None
+
+        if csv_path.exists():
+
+            csv_relative_url = (
+                f"/outputs/{csv_path.name}"
+            )
+
+        video_url = get_public_url(
+            video_relative_url
+        )
+
+        csv_url = (
+            get_public_url(csv_relative_url)
+            if csv_relative_url
+            else None
+        )
+
+        # ----------------------------------------------------
+        # J. RETURN RESPONSE
+        # ----------------------------------------------------
+
+        return {
+            "success": True,
+            "message": "Video processed successfully",
+
+            "filename": file.filename,
+            "file_size": file_size,
+
+            "video_info": video_info,
+
+            "video_url": video_url,
+            "output_video_url": video_url,
+
+            "csv_url": csv_url,
+            "csv_file_url": csv_url,
+
+            "analytics": analytics,
+            "summary": analytics,
+
+            "detection_engine": "YOLO11",
+            "tracking_engine": "ByteTrack",
+            "inference_runtime": "TensorFlow Lite",
+
+            "confidence": confidence,
+            "frame_interval": frame_interval,
         }
 
     except HTTPException:
@@ -575,30 +669,69 @@ async def process_uploaded_video(
 
     except Exception as error:
 
+        logger.exception(
+            "Video processing failed"
+        )
+
         raise HTTPException(
             status_code=500,
-            detail=f"Video processing failed: {str(error)}"
+            detail=f"Video processing failed: {str(error)}",
         )
 
     finally:
 
-        await file.close()
+        # Remove temporary uploaded video
+        if input_path and input_path.exists():
 
-        if input_path.exists():
-            input_path.unlink()
+            input_path.unlink(missing_ok=True)
+
+        await file.close()
 
 
 # ============================================================
-# 8. RUN LOCALLY
+# 14. OUTPUT FILE LIST ENDPOINT
+# ============================================================
+
+@app.get("/api/outputs")
+async def list_outputs():
+
+    files = []
+
+    for path in OUTPUT_DIR.iterdir():
+
+        if path.is_file():
+
+            files.append({
+                "filename": path.name,
+                "size": path.stat().st_size,
+                "url": get_public_url(
+                    f"/outputs/{path.name}"
+                ),
+            })
+
+    return {
+        "success": True,
+        "count": len(files),
+        "files": files,
+    }
+
+
+# ============================================================
+# 15. RUN APPLICATION
 # ============================================================
 
 if __name__ == "__main__":
 
     import uvicorn
 
+    port = int(
+        os.getenv("PORT", "8000")
+    )
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
-        reload=False
+        port=port,
+        reload=False,
     )
+
