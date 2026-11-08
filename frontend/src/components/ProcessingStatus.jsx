@@ -1,323 +1,27 @@
+import React from "react";
 
-import React, { useMemo } from "react";
-
-// =========================================================
-// HELPERS
-// =========================================================
-
-const formatNumber = (value) => {
-  const number = Number(value);
-
-  if (!Number.isFinite(number)) {
-    return "0";
-  }
-
-  return Math.round(number).toLocaleString();
+const formatSeconds = (value) => {
+  if (value === null || value === undefined || value === "") return "—";
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return "—";
+  if (seconds < 60) return `${seconds.toFixed(2)}s`;
+  return `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`;
 };
 
-const formatDuration = (seconds) => {
-  const value = Number(seconds);
-
-  if (!Number.isFinite(value) || value < 0) {
-    return "Calculating...";
-  }
-
-  const totalSeconds = Math.round(value);
-
-  if (totalSeconds < 60) {
-    return `${totalSeconds} sec`;
-  }
-
-  const minutes = Math.floor(totalSeconds / 60);
-  const remainingSeconds = totalSeconds % 60;
-
-  if (minutes < 60) {
-    return remainingSeconds
-      ? `${minutes} min ${remainingSeconds} sec`
-      : `${minutes} min`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-  const remainingMinutes = minutes % 60;
-
-  return `${hours} hr ${remainingMinutes} min`;
+const formatTimestamp = (value) => {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? `${seconds.toFixed(2)}s` : "—";
 };
 
-const formatClockTime = (value) => {
-  if (!value) return "—";
-
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return String(value);
-  }
-
-  return date.toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-};
-
-const getStatusLabel = (status) => {
-  const labels = {
-    queued: "Queued",
-    pending: "Waiting",
-    uploading: "Uploading",
-    processing: "Processing",
-    completed: "Completed",
-    failed: "Failed",
-    cancelled: "Cancelled",
-  };
-
-  return labels[String(status || "").toLowerCase()] || "Initializing";
-};
-
-const getStatusClass = (status) => {
-  const value = String(status || "").toLowerCase();
-
-  if (value === "completed") return "success";
-  if (value === "failed" || value === "cancelled") return "error";
-  if (value === "queued" || value === "pending") return "queued";
-
-  return "processing";
-};
-
-// =========================================================
-// ANALYTICS CARD
-// =========================================================
-
-function MetricCard({
-  label,
-  value,
-  description,
-  icon,
-}) {
+function MetricCard({ label, value, helper, accent }) {
   return (
-    <div className="pa-metric-card">
-
-      <div className="pa-metric-top">
-
-        <span className="pa-metric-icon">
-          {icon}
-        </span>
-
-        <span className="pa-metric-label">
-          {label}
-        </span>
-
-      </div>
-
-      <strong className="pa-metric-value">
-        {formatNumber(value)}
-      </strong>
-
-      {description && (
-        <small className="pa-metric-description">
-          {description}
-        </small>
-      )}
-
-    </div>
+    <article className={`pa-metric-card ${accent ? "pa-metric-accent" : ""}`}>
+      <span className="pa-metric-label">{label}</span>
+      <strong className="pa-metric-value">{value ?? "—"}</strong>
+      {helper ? <span className="pa-metric-helper">{helper}</span> : null}
+    </article>
   );
 }
-
-// =========================================================
-// ACTIVITY ITEM
-// =========================================================
-
-function ActivityItem({ item, index }) {
-  if (typeof item === "string") {
-    return (
-      <div className="pa-activity-item">
-        <span className="pa-activity-dot" />
-
-        <div className="pa-activity-content">
-          <span>{item}</span>
-        </div>
-      </div>
-    );
-  }
-
-  const frame =
-    item?.frame_number ??
-    item?.frame ??
-    item?.frame_id;
-
-  const timestamp =
-    item?.timestamp ??
-    item?.time ??
-    item?.created_at;
-
-  const people =
-    item?.people_count ??
-    item?.person_count ??
-    item?.people ??
-    item?.persons;
-
-  const objects =
-    item?.object_count ??
-    item?.objects_count ??
-    item?.total_objects;
-
-  const trackId =
-    item?.track_id ??
-    item?.person_id ??
-    item?.id;
-
-  const message =
-    item?.message ??
-    item?.description ??
-    item?.event ??
-    item?.activity;
-
-  return (
-    <div
-      className="pa-activity-item"
-      key={item?.id ?? index}
-    >
-
-      <span className="pa-activity-dot" />
-
-      <div className="pa-activity-content">
-
-        <div className="pa-activity-heading">
-
-          <strong>
-            {message ||
-              (trackId !== undefined
-                ? `Person detected · ID ${trackId}`
-                : "Detection update")}
-          </strong>
-
-          {timestamp && (
-            <time>
-              {formatClockTime(timestamp)}
-            </time>
-          )}
-
-        </div>
-
-        <div className="pa-activity-meta">
-
-          {frame !== undefined && (
-            <span>
-              Frame: {formatNumber(frame)}
-            </span>
-          )}
-
-          {people !== undefined && (
-            <span>
-              People: {formatNumber(people)}
-            </span>
-          )}
-
-          {objects !== undefined && (
-            <span>
-              Objects: {formatNumber(objects)}
-            </span>
-          )}
-
-          {trackId !== undefined && !message && (
-            <span>
-              Track ID: {String(trackId)}
-            </span>
-          )}
-
-        </div>
-
-      </div>
-
-    </div>
-  );
-}
-
-// =========================================================
-// LATEST FRAME PREVIEW
-// =========================================================
-
-function LatestFramePreview({ frame }) {
-  const imageSource = useMemo(() => {
-    if (!frame) return null;
-
-    if (typeof frame === "string") {
-      return frame;
-    }
-
-    if (typeof frame === "object") {
-      return (
-        frame.image_url ||
-        frame.url ||
-        frame.data_url ||
-        frame.image ||
-        frame.frame_image ||
-        null
-      );
-    }
-
-    return null;
-  }, [frame]);
-
-  const frameNumber =
-    typeof frame === "object"
-      ? frame.frame_number ?? frame.frame ?? null
-      : null;
-
-  if (!imageSource) {
-    return (
-      <div className="pa-frame-empty">
-
-        <div className="pa-frame-empty-icon">
-          ▣
-        </div>
-
-        <strong>
-          Waiting for frame preview
-        </strong>
-
-        <span>
-          The latest processed frame will appear here
-          when the backend publishes an image.
-        </span>
-
-      </div>
-    );
-  }
-
-  return (
-    <div className="pa-frame-preview">
-
-      <div className="pa-frame-header">
-
-        <strong>
-          Latest processed frame
-        </strong>
-
-        {frameNumber !== null && (
-          <span>
-            Frame {formatNumber(frameNumber)}
-          </span>
-        )}
-
-      </div>
-
-      <img
-        src={imageSource}
-        alt="Latest YOLO object detection frame"
-        className="pa-frame-image"
-        loading="lazy"
-        onError={(event) => {
-          event.currentTarget.style.display = "none";
-        }}
-      />
-
-    </div>
-  );
-}
-
-// =========================================================
-// MAIN PROCESSING STATUS COMPONENT
-// =========================================================
 
 export default function ProcessingStatus({
   job,
@@ -325,518 +29,151 @@ export default function ProcessingStatus({
   onStopPolling,
   showActivity = true,
 }) {
-  if (!job) {
-    return null;
-  }
+  if (!job) return null;
 
-  // -------------------------------------------------------
-  // JOB STATUS
-  // -------------------------------------------------------
-
-  const status = String(
-    job.status || "initializing"
-  ).toLowerCase();
-
-  const statusLabel = getStatusLabel(status);
-  const statusClass = getStatusClass(status);
-
-  const isCompleted = status === "completed";
-
-  const isFailed =
-    status === "failed" ||
-    status === "cancelled";
-
-  const isActive =
-    status === "processing" ||
-    status === "queued" ||
-    status === "pending" ||
-    status === "uploading";
-
-  // -------------------------------------------------------
-  // PROGRESS
-  // -------------------------------------------------------
-
-  const progressValue = Number(job.progress);
-
-  const progress = Math.max(
-    0,
-    Math.min(
-      100,
-      Number.isFinite(progressValue)
-        ? progressValue
-        : isCompleted
-          ? 100
-          : 0
-    )
-  );
-
-  // -------------------------------------------------------
-  // FRAME INFORMATION
-  // -------------------------------------------------------
-
-  const currentFrame = Number(
-    job.current_frame ??
-    job.frames_processed ??
-    job.processed_frames ??
-    0
-  );
-
-  const totalFrames = Number(
-    job.total_frames ??
-    job.frame_count ??
-    0
-  );
-
-  const remainingFrames = Math.max(
-    0,
-    totalFrames - currentFrame
-  );
-
-  // -------------------------------------------------------
-  // PEOPLE / OBJECT COUNTS
-  // -------------------------------------------------------
-
-  const currentPeople =
-    job.current_people ??
-    job.people_count ??
-    job.current_person_count ??
-    0;
-
-  const currentObjects =
-    job.current_objects ??
-    job.objects_count ??
-    job.object_count ??
-    0;
-
-  const uniquePeople =
-    job.unique_people_so_far ??
-    job.unique_people ??
-    job.total_unique_people ??
-    0;
-
-  // -------------------------------------------------------
-  // ETA
-  // -------------------------------------------------------
-
-  const eta =
-    job.eta_seconds ??
-    job.estimated_remaining_seconds ??
-    job.remaining_seconds ??
-    null;
-
-  // -------------------------------------------------------
-  // ACTIVITY
-  // -------------------------------------------------------
-
-  const activity = Array.isArray(job.recent_activity)
-    ? job.recent_activity
-    : Array.isArray(job.activity)
-      ? job.activity
-      : [];
-
-  // -------------------------------------------------------
-  // LATEST FRAME
-  // -------------------------------------------------------
-
-  const latestFrame =
-    job.latest_frame ||
-    job.preview_frame ||
-    job.current_frame_image ||
-    null;
-
-  // -------------------------------------------------------
-  // JOB ID
-  // -------------------------------------------------------
-
-  const jobId =
-    job.job_id ||
-    job.id ||
-    "—";
-
-  // -------------------------------------------------------
-  // RENDER
-  // -------------------------------------------------------
+  const latest = job.latest_frame || null;
+  const recentActivity = Array.isArray(job.recent_activity)
+    ? [...job.recent_activity].reverse()
+    : [];
+  const progress = Math.max(0, Math.min(100, Number(job.progress) || 0));
+  const status = String(job.status || "queued").toLowerCase();
+  const active = status === "queued" || status === "processing";
+  const currentFrame = job.current_frame ?? latest?.frame_number ?? 0;
+  const totalFrames = job.total_frames ?? latest?.total_frames ?? "—";
+  const currentPeople = job.current_people ?? latest?.people_found ?? 0;
+  const currentObjects = job.current_objects ?? latest?.objects_found ?? 0;
+  const uniquePeople = job.unique_people_so_far ?? latest?.unique_people_so_far ?? 0;
+  const trackIds = Array.isArray(latest?.track_ids) ? latest.track_ids : [];
 
   return (
-    <section className="pa-panel pa-processing-panel">
-
-      {/* HEADER */}
-      <div className="pa-section-title">
-
+    <section className="pa-panel pa-live-panel" aria-live="polite">
+      <div className="pa-section-heading">
         <div>
-
-          <span className="pa-kicker">
-            LIVE VIDEO ANALYSIS
-          </span>
-
-          <h2>
-            Processing dashboard
-          </h2>
-
-          <p>
-            YOLO11 detection and ByteTrack tracking
-            progress.
-          </p>
-
+          <span className="pa-kicker">LIVE JOB MONITOR</span>
+          <h2>Processing status</h2>
+          <p>{job.message || "Waiting for processing updates from the backend…"}</p>
         </div>
-
-        <span
-          className={`pa-job-status is-${statusClass}`}
-        >
-
+        <span className={`pa-job-status status-${status}`}>
           <span className="pa-status-dot" />
-
-          {statusLabel}
-
+          {status}
         </span>
-
       </div>
 
-      {/* JOB INFORMATION */}
-      <div className="pa-job-information">
-
-        <div>
-          <span>Job ID</span>
-
-          <strong title={jobId}>
-            {jobId}
-          </strong>
-        </div>
-
-        <div>
-          <span>Started</span>
-
-          <strong>
-            {formatClockTime(
-              job.started_at ||
-              job.created_at
-            )}
-          </strong>
-        </div>
-
-        <div>
-          <span>Frame interval</span>
-
-          <strong>
-            {job.frame_interval ?? 2}
-          </strong>
-        </div>
-
-        <div>
-          <span>Image size</span>
-
-          <strong>
-            {job.imgsz || job.image_size || 320}
-          </strong>
-        </div>
-
+      <div className="pa-progress-heading">
+        <strong>Frame {currentFrame} <span>/ {totalFrames}</span></strong>
+        <strong>{progress.toFixed(1)}%</strong>
+      </div>
+      <div
+        className={`pa-progress-track ${active ? "is-animated" : ""}`}
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress}
+        aria-label="Video processing progress"
+      >
+        <div className="pa-progress-fill" style={{ width: `${progress}%` }} />
+      </div>
+      <div className="pa-progress-meta">
+        <span>Elapsed: {formatSeconds(job.processing_seconds)}</span>
+        <span>ETA: {formatSeconds(job.eta_seconds)}</span>
       </div>
 
-      {/* PROGRESS SECTION */}
-      <div className="pa-progress-section">
-
-        <div className="pa-progress-heading">
-
-          <div>
-            <span>
-              Overall progress
-            </span>
-
-            <strong>
-              {progress.toFixed(1)}%
-            </strong>
-          </div>
-
-          <span className="pa-progress-status">
-            {isCompleted
-              ? "Processing complete"
-              : isFailed
-                ? "Processing stopped"
-                : "Detection in progress"}
-          </span>
-
+      {active && (
+        <div className="pa-processing-pulse">
+          <span className="pa-pulse-dot" />
+          {isPolling ? "Receiving live frame updates" : "Job is running; status polling is paused"}
         </div>
+      )}
 
-        <div
-          className="pa-progress-track"
-          role="progressbar"
-          aria-label="Video processing progress"
-          aria-valuenow={progress}
-          aria-valuemin={0}
-          aria-valuemax={100}
-        >
-
-          <div
-            className={`pa-progress-fill ${
-              isFailed ? "is-failed" : ""
-            }`}
-            style={{
-              width: `${progress}%`,
-            }}
-          />
-
-        </div>
-
-        <div className="pa-progress-footer">
-
-          <span>
-            {formatNumber(currentFrame)} frames processed
-          </span>
-
-          <span>
-            {totalFrames > 0
-              ? `${formatNumber(totalFrames)} total frames`
-              : "Total frames being calculated"}
-          </span>
-
-        </div>
-
+      <div className="pa-metrics-grid">
+        <MetricCard label="People in current frame" value={currentPeople} helper="Person class detections" accent />
+        <MetricCard label="Objects in current frame" value={currentObjects} helper="All detected classes" />
+        <MetricCard label="Unique people tracked" value={uniquePeople} helper="Distinct ByteTrack IDs" />
+        <MetricCard label="Current frame time" value={latest ? formatSeconds(latest.frame_seconds) : "—"} helper="Read + inference + write" />
       </div>
 
-      {/* FRAME PROCESSING DETAILS */}
-      <div className="pa-processing-details">
-
-        <div className="pa-detail-item">
-
-          <span>
-            Current frame
-          </span>
-
-          <strong>
-            {formatNumber(currentFrame)}
-          </strong>
-
+      <div className="pa-latest-frame">
+        <div className="pa-section-heading">
+          <h3>Latest frame details</h3>
+          <span className="pa-frame-chip">{latest ? `Frame ${latest.frame_number}` : "Awaiting first frame"}</span>
         </div>
 
-        <div className="pa-detail-item">
-
-          <span>
-            Remaining frames
-          </span>
-
-          <strong>
-            {formatNumber(remainingFrames)}
-          </strong>
-
-        </div>
-
-        <div className="pa-detail-item">
-
-          <span>
-            Estimated time remaining
-          </span>
-
-          <strong>
-            {isCompleted
-              ? "Completed"
-              : formatDuration(eta)}
-          </strong>
-
-        </div>
-
-      </div>
-
-      {/* LIVE ANALYTICS */}
-      <div className="pa-live-analytics">
-
-        <div className="pa-subsection-heading">
-
-          <div>
-            <h3>
-              Detection analytics
-            </h3>
-
-            <p>
-              Latest available detection statistics
-            </p>
-          </div>
-
-          {isPolling && (
-            <span className="pa-live-indicator">
-              <span className="pa-status-dot" />
-              LIVE
-            </span>
-          )}
-
-        </div>
-
-        <div className="pa-metrics-grid">
-
-          <MetricCard
-            label="Current people"
-            value={currentPeople}
-            description="People in the latest processed frame"
-            icon="●"
-          />
-
-          <MetricCard
-            label="Unique people"
-            value={uniquePeople}
-            description="Unique tracked identities so far"
-            icon="◉"
-          />
-
-          <MetricCard
-            label="Current objects"
-            value={currentObjects}
-            description="Objects detected in the latest frame"
-            icon="▣"
-          />
-
-          <MetricCard
-            label="Frames processed"
-            value={currentFrame}
-            description="Frames analysed by the backend"
-            icon="▤"
-          />
-
-        </div>
-
-      </div>
-
-      {/* LATEST FRAME AND ACTIVITY */}
-      <div className="pa-live-grid">
-
-        <div className="pa-live-frame">
-
-          <LatestFramePreview
-            frame={latestFrame}
-          />
-
-        </div>
-
-        {showActivity && (
-
-          <div className="pa-activity-panel">
-
-            <div className="pa-subsection-heading">
-
-              <div>
-                <h3>
-                  Recent activity
-                </h3>
-
-                <p>
-                  Latest detection events
-                </p>
+        {latest ? (
+          <>
+            <div className="pa-latest-grid">
+              <div><span>Frame position</span><strong>{latest.frame_number ?? "—"} / {latest.total_frames ?? totalFrames}</strong></div>
+              <div><span>Video timestamp</span><strong>{formatTimestamp(latest.timestamp_seconds)}</strong></div>
+              <div><span>Inference status</span><strong>{latest.inference_performed ? "YOLO inference" : "Carried forward"}</strong></div>
+              <div><span>Inference time</span><strong>{formatSeconds(latest.inference_seconds)}</strong></div>
+              <div><span>Frame processing time</span><strong>{formatSeconds(latest.frame_seconds)}</strong></div>
+              <div><span>Frame result</span><strong>{latest.status || "—"}</strong></div>
+            </div>
+            <div className="pa-track-ids">
+              <strong>Track IDs in current frame</strong>
+              <div className="pa-id-list">
+                {trackIds.length
+                  ? trackIds.map((id) => <span className="pa-id-chip" key={String(id)}>ID {id}</span>)
+                  : <span className="pa-muted">No tracked people in this frame</span>}
               </div>
-
-              <span className="pa-activity-count">
-                {activity.length}
-              </span>
-
             </div>
-
-            <div className="pa-activity-list">
-
-              {activity.length > 0 ? (
-
-                activity
-                  .slice(-20)
-                  .reverse()
-                  .map((item, index) => (
-                    <ActivityItem
-                      key={
-                        item?.id ??
-                        item?.event_id ??
-                        `${index}-${item?.frame_number ?? ""}`
-                      }
-                      item={item}
-                      index={index}
-                    />
-                  ))
-
-              ) : (
-
-                <div className="pa-activity-empty">
-
-                  <span>
-                    No detection activity available yet.
-                  </span>
-
-                  <small>
-                    Events will appear here as processing continues.
-                  </small>
-
-                </div>
-
-              )}
-
-            </div>
-
+          </>
+        ) : (
+          <div className="pa-empty-state">
+            <span className="pa-spinner" />
+            <p>Waiting for the first frame update from YOLO11…</p>
           </div>
-
         )}
-
       </div>
 
-      {/* ERROR INFORMATION */}
-      {isFailed && (
-
-        <div className="pa-error">
-
-          <strong>
-            Processing {status}
-          </strong>
-
-          <p>
-            {job.error ||
-              job.message ||
-              "The backend could not complete this job."}
-          </p>
-
+      {showActivity && (
+        <div className="pa-activity">
+          <div className="pa-section-heading">
+            <div><h3>Recent frame activity</h3><p>Latest frame-level updates received from FastAPI.</p></div>
+            <span className="pa-update-count">{recentActivity.length} updates</span>
+          </div>
+          {recentActivity.length ? (
+            <div className="pa-table-wrap">
+              <table className="pa-activity-table">
+                <thead>
+                  <tr>
+                    <th>Frame</th><th>Timestamp</th><th>People</th><th>Objects</th>
+                    <th>Track IDs</th><th>Inference</th><th>Frame time</th><th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentActivity.map((item, index) => (
+                    <tr key={`${item.frame_number ?? "frame"}-${index}`}>
+                      <td className="pa-frame-number">{item.frame_number ?? "—"}</td>
+                      <td>{formatTimestamp(item.timestamp_seconds)}</td>
+                      <td><strong>{item.people_found ?? 0}</strong></td>
+                      <td>{item.objects_found ?? 0}</td>
+                      <td>{Array.isArray(item.track_ids) && item.track_ids.length ? item.track_ids.join(", ") : "—"}</td>
+                      <td><span className={`pa-inference-tag ${item.inference_performed ? "is-done" : "is-skip"}`}>{item.inference_performed ? "Yes" : "Skipped"}</span></td>
+                      <td>{formatSeconds(item.frame_seconds)}</td>
+                      <td>{item.status || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="pa-empty-state"><p>Frame updates will appear here as video processing continues.</p></div>
+          )}
         </div>
-
       )}
 
-      {/* COMPLETION INFORMATION */}
-      {isCompleted && (
-
-        <div className="pa-completion-message">
-
-          <strong>
-            ✓ Video processing completed
-          </strong>
-
-          <p>
-            Your processed video and analytics
-            are ready for download.
-          </p>
-
-        </div>
-
+      {active && isPolling && typeof onStopPolling === "function" && (
+        <button type="button" className="pa-secondary-button" onClick={onStopPolling}>
+          Stop browser status polling
+        </button>
       )}
 
-      {/* STOP POLLING */}
-      {isActive && isPolling && onStopPolling && (
-
-        <div className="pa-polling-controls">
-
-          <span>
-            Browser is checking job status automatically.
-          </span>
-
-          <button
-            type="button"
-            className="pa-text-button"
-            onClick={onStopPolling}
-          >
-            Stop status updates
-          </button>
-
-        </div>
-
+      {status === "failed" && (
+        <div className="pa-error" role="alert">{job.error || job.message || "Video processing failed."}</div>
       )}
-
-      {isActive && !isPolling && (
-
-        <div className="pa-polling-paused">
-          Status polling is stopped. The backend job
-          may still be processing.
-        </div>
-
+      {status === "completed" && (
+        <div className="pa-success-message">Video processing completed successfully.</div>
       )}
-
     </section>
   );
 }
