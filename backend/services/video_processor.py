@@ -1,3 +1,4 @@
+
 """
 PragyanAI - People Detection & Counting
 Video Processing Engine
@@ -15,9 +16,9 @@ processor = VideoProcessor("models/yolo11n.tflite")
 analytics = processor.process(
     input_video,
     output_video,
-    confidence,
-    frame_interval,
-    csv_path
+    confidence=0.35,
+    frame_interval=2,
+    csv_path=csv_path
 )
 """
 
@@ -58,7 +59,7 @@ class VideoProcessor:
     def __init__(
         self,
         model_path,
-        imgsz=640,
+        imgsz=320,
         tracker="bytetrack.yaml",
         output_fps_fallback=25.0,
     ):
@@ -67,7 +68,7 @@ class VideoProcessor:
 
         Args:
             model_path: Path to YOLO11 TFLite model.
-            imgsz: Inference image size.
+            imgsz: Inference image size (default 320 to reduce CPU load).
             tracker: Ultralytics tracker configuration.
             output_fps_fallback: FPS fallback for invalid metadata.
         """
@@ -774,7 +775,7 @@ class VideoProcessor:
         input_video,
         output_video,
         confidence=0.35,
-        frame_interval=1,
+        frame_interval=2,
         csv_path=None,
         progress_callback=None,
     ):
@@ -785,7 +786,7 @@ class VideoProcessor:
             input_video: Uploaded source video.
             output_video: Processed MP4 output.
             confidence: YOLO confidence threshold.
-            frame_interval: Run inference every N frames.
+            frame_interval: Run inference every N frames (default 2).
             csv_path: CSV analytics destination.
             progress_callback: Optional callback(progress, current_frame, total_frames, eta_seconds, frame_update).
 
@@ -871,9 +872,10 @@ class VideoProcessor:
         processed_frames = 0
         inference_frames = 0
 
-        people_per_frame = []
-
-        confidence_values = []
+        people_count_sum = 0
+        peak_people = 0
+        confidence_sum = 0.0
+        confidence_sample_count = 0
 
         last_detections = []
 
@@ -966,9 +968,11 @@ class VideoProcessor:
                         time.perf_counter() - stage_start)
 
             logger.info("[STAGE 5/8] Starting frame-by-frame processing | "
-                        "total_frames=%s | expected_inference_frames=%s",
+                        "total_frames=%s | expected_inference_frames=%s | "
+                        "frame_interval=%s | imgsz=%s",
                         total_frames,
-                        (total_frames + frame_interval - 1) // frame_interval)
+                        (total_frames + frame_interval - 1) // frame_interval,
+                        frame_interval, self.imgsz)
 
             # ------------------------------------------------
             # D. PROCESS FRAMES
@@ -1027,9 +1031,8 @@ class VideoProcessor:
                                 track_id
                             )
 
-                        confidence_values.append(
-                            detection["confidence"]
-                        )
+                        confidence_sum += float(detection["confidence"])
+                        confidence_sample_count += 1
 
                 else:
 
@@ -1043,9 +1046,8 @@ class VideoProcessor:
 
                 people_count = len(detections)
 
-                people_per_frame.append(
-                    people_count
-                )
+                people_count_sum += people_count
+                peak_people = max(peak_people, people_count)
 
                 # --------------------------------------------
                 # DRAW BOUNDING BOXES
@@ -1347,21 +1349,13 @@ class VideoProcessor:
             )
 
             average_people = (
-                float(np.mean(people_per_frame))
-                if people_per_frame
-                else 0.0
-            )
-
-            peak_people = (
-                max(people_per_frame)
-                if people_per_frame
-                else 0
+                people_count_sum / processed_frames
+                if processed_frames else 0.0
             )
 
             average_confidence = (
-                float(np.mean(confidence_values))
-                if confidence_values
-                else 0.0
+                confidence_sum / confidence_sample_count
+                if confidence_sample_count else 0.0
             )
 
             processing_fps = (
