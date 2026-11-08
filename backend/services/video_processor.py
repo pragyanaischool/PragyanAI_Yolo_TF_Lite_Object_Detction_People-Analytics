@@ -123,6 +123,7 @@ class VideoProcessor:
             ) from exc
 
         self.model_loaded = True
+        self._inference_call_count = 0
 
         logger.info(
             "[MODEL INIT COMPLETE] YOLO model initialized in %.2f seconds",
@@ -255,25 +256,46 @@ class VideoProcessor:
         confidence=0.35,
     ):
         """
-        Run YOLO11 inference and ByteTrack.
+        Run YOLO11 TFLite inference and ByteTrack.
+
+        Logs the first inference separately from subsequent calls.
+        Detailed per-call logs are emitted for the first 10 calls,
+        every 25th call, and any inference taking at least 2 seconds.
 
         Returns:
-            List of dictionaries:
-            [
-                {
-                    "track_id": 1,
-                    "x1": 10,
-                    "y1": 20,
-                    "x2": 100,
-                    "y2": 200,
-                    "confidence": 0.91,
-                    "class_id": 0
-                }
-            ]
+            List of person detection dictionaries.
         """
 
-        inference_start = time.perf_counter()
+        call_number = getattr(self, "_inference_call_count", 0) + 1
+        self._inference_call_count = call_number
+
+        frame_start = time.perf_counter()
+        frame_height, frame_width = frame.shape[:2]
+
+        inference_type = (
+            "FIRST_INFERENCE"
+            if call_number == 1
+            else "SUBSEQUENT_INFERENCE"
+        )
+
+        log_this_call = call_number <= 10 or call_number % 25 == 0
+
+        if log_this_call:
+            logger.info(
+                "[YOLO INFERENCE START] type=%s | call=%s | "
+                "frame_size=%sx%s | imgsz=%s | confidence=%.3f",
+                inference_type,
+                call_number,
+                frame_width,
+                frame_height,
+                self.imgsz,
+                float(confidence),
+            )
+
         try:
+            # The first call may include lazy predictor, LiteRT interpreter,
+            # and tracker initialization. Measure model.track separately.
+            model_start = time.perf_counter()
 
             results = self.model.track(
                 source=frame,
@@ -285,89 +307,114 @@ class VideoProcessor:
                 verbose=False,
             )
 
-        except Exception as exc:
+            model_track_seconds = time.perf_counter() - model_start
 
-            logger.exception("[INFERENCE FAILED] YOLO11 model.track() failed")
-            raise VideoProcessingError(
-                "YOLO11 inference or ByteTrack failed. "
-                "Check whether your installed Ultralytics "
-                f"version supports TFLite tracking. Details: {exc}"
-            ) from exc
+            detections = []
+            raw_box_count = 0
 
-        inference_seconds = time.perf_counter() - inference_start
-        detections = []
+            if results:
+                result = results[0]
+                boxes = result.boxes
 
-        if not results:
-            logger.debug("[INFERENCE] No result object returned (%.3fs)",
-                         inference_seconds)
-            return detections
+                if boxes is not None and len(boxes) > 0:
+                    xyxy = boxes.xyxy.cpu().numpy()
+                    confidences = boxes.conf.cpu().numpy()
+                    classes = boxes.cls.cpu().numpy().astype(int)
 
-        result = results[0]
+                    track_ids = None
+                    if boxes.id is not None:
+                        track_ids = boxes.id.cpu().numpy().astype(int)
 
-        boxes = result.boxes
+                    raw_box_count = len(xyxy)
 
-        if boxes is None or len(boxes) == 0:
-            logger.debug("[INFERENCE] No person boxes returned (%.3fs)",
-                         inference_seconds)
-            return detections
+                    for index, coordinates in enumerate(xyxy):
+                        class_id = int(classes[index])
 
-        xyxy = boxes.xyxy.cpu().numpy()
+                        if class_id != 0:
+                            continue
 
-        confidences = boxes.conf.cpu().numpy()
+                        x1, y1, x2, y2 = coordinates.tolist()
 
-        classes = boxes.cls.cpu().numpy().astype(int)
+                        track_id = None
+                        if track_ids is not None and index < len(track_ids):
+                            track_id = int(track_ids[index])
 
-        track_ids = None
+                        detections.append({
+                            "track_id": track_id,
+                            "x1": int(x1),
+                            "y1": int(y1),
+                            "x2": int(x2),
+                            "y2": int(y2),
+                            "confidence": float(confidences[index]),
+                            "class_id": class_id,
+                        })
 
-        if boxes.id is not None:
-
-            track_ids = (
-                boxes.id.cpu().numpy().astype(int)
+            total_seconds = time.perf_counter() - frame_start
+            postprocess_seconds = max(
+                total_seconds - model_track_seconds, 0.0
             )
 
-        for index, coordinates in enumerate(xyxy):
+            tracked_ids = [
+                item["track_id"]
+                for item in detections
+                if item["track_id"] is not None
+            ]
 
-            class_id = int(classes[index])
+            average_confidence = (
+                float(np.mean([
+                    item["confidence"] for item in detections
+                ]))
+                if detections
+                else 0.0
+            )
 
-            # Only person class
-            if class_id != 0:
-                continue
+            should_log_result = (
+                log_this_call
+                or model_track_seconds >= 2.0
+                or total_seconds >= 2.0
+            )
 
-            x1, y1, x2, y2 = coordinates.tolist()
+            if should_log_result:
+                logger.info(
+                    "[YOLO INFERENCE COMPLETE] type=%s | call=%s | "
+                    "model_track=%.3fs | postprocess=%.3fs | "
+                    "total=%.3fs | inference_fps=%.3f | "
+                    "raw_boxes=%s | people=%s | tracked_ids=%s | "
+                    "avg_confidence=%.3f",
+                    inference_type,
+                    call_number,
+                    model_track_seconds,
+                    postprocess_seconds,
+                    total_seconds,
+                    (1.0 / total_seconds) if total_seconds > 0 else 0.0,
+                    raw_box_count,
+                    len(detections),
+                    tracked_ids[:30],
+                    average_confidence,
+                )
 
-            track_id = None
+            return detections
 
-            if track_ids is not None:
-                track_id = int(track_ids[index])
+        except Exception as exc:
+            elapsed = time.perf_counter() - frame_start
 
-            detections.append({
+            logger.exception(
+                "[YOLO INFERENCE FAILED] type=%s | call=%s | "
+                "elapsed=%.3fs | frame_size=%sx%s | error=%s",
+                inference_type,
+                call_number,
+                elapsed,
+                frame_width,
+                frame_height,
+                str(exc),
+            )
 
-                "track_id": track_id,
-
-                "x1": int(x1),
-                "y1": int(y1),
-
-                "x2": int(x2),
-                "y2": int(y2),
-
-                "confidence": float(
-                    confidences[index]
-                ),
-
-                "class_id": class_id,
-
-            })
-
-        logger.debug(
-            "[INFERENCE] %.3fs | raw_boxes=%s | person_detections=%s | "
-            "tracked_ids=%s",
-            inference_seconds,
-            len(xyxy),
-            len(detections),
-            sum(1 for item in detections if item["track_id"] is not None),
-        )
-
-        return detections
+            raise VideoProcessingError(
+                "YOLO11 inference or ByteTrack failed. "
+                "Check whether your installed Ultralytics version "
+                "supports TFLite tracking. "
+                f"Details: {exc}"
+            ) from exc
 
     # ========================================================
     # 6. DRAW DETECTION BOXES
@@ -925,6 +972,8 @@ class VideoProcessor:
             # ------------------------------------------------
 
             frame_number = 0
+            self._inference_call_count = 0
+            logger.info("[INFERENCE COUNTER] Reset for this video job")
 
             while True:
 
