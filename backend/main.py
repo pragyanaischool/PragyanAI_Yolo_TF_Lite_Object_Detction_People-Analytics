@@ -535,16 +535,61 @@ async def process_job_background(
     logger.info("[ASYNC JOB START] job_id=%s", job_id)
 
     try:
-        def publish_progress(percent, current_frame, total_frames, eta_seconds):
+        def publish_progress(
+            percent,
+            current_frame,
+            total_frames,
+            eta_seconds,
+            frame_update=None,
+        ):
+            """Receive progress from the processor thread and publish it safely."""
             overall_progress = 10 + (float(percent) * 0.85)
-            update_job(
-                job_id,
-                progress=min(95, round(overall_progress, 1)),
-                current_frame=int(current_frame),
-                total_frames=int(total_frames),
-                eta_seconds=round(float(eta_seconds), 1),
-                message=f"Processing frame {current_frame} of {total_frames}.",
-            )
+
+            # Keep the frame payload small and JSON-safe for the polling API.
+            safe_frame_update = None
+            if isinstance(frame_update, dict):
+                safe_frame_update = {
+                    "event": str(frame_update.get("event", "frame_processed")),
+                    "frame_number": int(frame_update.get("frame_number", current_frame) or 0),
+                    "total_frames": int(frame_update.get("total_frames", total_frames) or 0),
+                    "progress": round(float(frame_update.get("progress", percent) or 0), 2),
+                    "timestamp_seconds": round(float(frame_update.get("timestamp_seconds", 0) or 0), 3),
+                    "status": str(frame_update.get("status", "UNKNOWN")),
+                    "objects_found": int(frame_update.get("objects_found", 0) or 0),
+                    "people_found": int(frame_update.get("people_found", 0) or 0),
+                    "track_ids": [int(value) for value in (frame_update.get("track_ids") or [])],
+                    "inference_performed": bool(frame_update.get("inference_performed", False)),
+                    "inference_seconds": round(float(frame_update.get("inference_seconds", 0) or 0), 4),
+                    "frame_seconds": round(float(frame_update.get("frame_seconds", 0) or 0), 4),
+                    "unique_people_so_far": int(frame_update.get("unique_people_so_far", 0) or 0),
+                    "eta_seconds": round(float(frame_update.get("eta_seconds", eta_seconds) or 0), 1),
+                }
+
+            changes = {
+                "progress": min(95, round(overall_progress, 1)),
+                "current_frame": int(current_frame),
+                "total_frames": int(total_frames),
+                "eta_seconds": round(float(eta_seconds), 1),
+                "message": f"Processing frame {current_frame} of {total_frames}.",
+            }
+
+            if safe_frame_update is not None:
+                changes["latest_frame"] = safe_frame_update
+                changes["current_people"] = safe_frame_update["people_found"]
+                changes["current_objects"] = safe_frame_update["objects_found"]
+                changes["unique_people_so_far"] = safe_frame_update["unique_people_so_far"]
+
+                # Retain only the latest 20 updates to keep polling responses small.
+                with jobs_lock:
+                    current_job = jobs.get(job_id)
+                    if current_job is not None:
+                        activity = current_job.setdefault("recent_activity", [])
+                        activity.append(safe_frame_update)
+                        current_job["recent_activity"] = activity[-20:]
+                        current_job.update(changes)
+                        current_job["updated_at"] = time.time()
+            else:
+                update_job(job_id, **changes)
 
         analytics_result = await run_in_threadpool(
             current_processor.process,
@@ -705,6 +750,11 @@ async def create_video_job(
                 "updated_at": now,
                 "result": None,
                 "error": None,
+                "latest_frame": None,
+                "recent_activity": [],
+                "current_people": 0,
+                "current_objects": 0,
+                "unique_people_so_far": 0,
             }
 
         background_tasks.add_task(
@@ -753,7 +803,7 @@ async def create_video_job(
 
 @app.get("/api/jobs/{job_id}")
 async def get_video_job_status(job_id: str):
-    """Return job status, progress, and completed result when available."""
+    """Return job status, live per-frame updates, and completed result when available."""
     job = get_job_snapshot(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -769,6 +819,11 @@ async def get_video_job_status(job_id: str):
         "current_frame": job.get("current_frame"),
         "total_frames": job.get("total_frames"),
         "eta_seconds": job.get("eta_seconds"),
+        "latest_frame": job.get("latest_frame"),
+        "recent_activity": job.get("recent_activity", []),
+        "current_people": job.get("current_people", 0),
+        "current_objects": job.get("current_objects", 0),
+        "unique_people_so_far": job.get("unique_people_so_far", 0),
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
         "processing_seconds": job.get("processing_seconds"),
