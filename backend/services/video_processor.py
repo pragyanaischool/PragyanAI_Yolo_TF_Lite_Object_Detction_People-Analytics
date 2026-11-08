@@ -28,6 +28,7 @@ import time
 import logging
 import threading
 import subprocess
+import importlib.metadata
 
 from pathlib import Path
 from collections import defaultdict
@@ -88,10 +89,24 @@ class VideoProcessor:
                 f"YOLO model not found: {self.model_path}"
             )
 
-        logger.info(
-            "Loading YOLO model: %s",
-            self.model_path,
-        )
+        logger.info("=" * 72)
+        logger.info("[MODEL INIT] Starting YOLO11 TFLite initialization")
+        logger.info("[MODEL INIT] Model path: %s", self.model_path)
+        logger.info("[MODEL INIT] Model size: %.2f MB",
+                    self.model_path.stat().st_size / (1024 * 1024))
+        logger.info("[MODEL INIT] imgsz=%s | tracker=%s",
+                    self.imgsz, self.tracker)
+
+        for package_name in ("ultralytics", "ai-edge-litert", "lap",
+                             "tensorflow-cpu", "numpy", "opencv-python-headless"):
+            try:
+                logger.info("[ENV] %s=%s", package_name,
+                            importlib.metadata.version(package_name))
+            except importlib.metadata.PackageNotFoundError:
+                logger.warning("[ENV] %s distribution not found", package_name)
+
+        model_init_start = time.perf_counter()
+        logger.info("[MODEL INIT] Loading YOLO model: %s", self.model_path)
 
         try:
 
@@ -102,6 +117,7 @@ class VideoProcessor:
 
         except Exception as exc:
 
+            logger.exception("[MODEL INIT FAILED] Unable to load YOLO model")
             raise VideoProcessingError(
                 f"Unable to load YOLO model: {exc}"
             ) from exc
@@ -109,8 +125,10 @@ class VideoProcessor:
         self.model_loaded = True
 
         logger.info(
-            "YOLO model initialized successfully"
+            "[MODEL INIT COMPLETE] YOLO model initialized in %.2f seconds",
+            time.perf_counter() - model_init_start
         )
+        logger.info("=" * 72)
 
     # ========================================================
     # 3. RESET TRACKER
@@ -133,6 +151,8 @@ class VideoProcessor:
             )
 
             if predictor is None:
+                logger.info("[TRACKER] Predictor not initialized yet; "
+                            "Ultralytics will initialize it on first track call.")
                 return
 
             trackers = getattr(
@@ -148,7 +168,8 @@ class VideoProcessor:
                     if hasattr(tracker, "reset"):
                         tracker.reset()
 
-            logger.info("Tracker state reset")
+            logger.info("[TRACKER] Tracker reset completed. Tracker instances: %s",
+                        len(trackers) if trackers else 0)
 
         except Exception as exc:
 
@@ -251,6 +272,7 @@ class VideoProcessor:
             ]
         """
 
+        inference_start = time.perf_counter()
         try:
 
             results = self.model.track(
@@ -265,15 +287,19 @@ class VideoProcessor:
 
         except Exception as exc:
 
+            logger.exception("[INFERENCE FAILED] YOLO11 model.track() failed")
             raise VideoProcessingError(
                 "YOLO11 inference or ByteTrack failed. "
                 "Check whether your installed Ultralytics "
                 f"version supports TFLite tracking. Details: {exc}"
             ) from exc
 
+        inference_seconds = time.perf_counter() - inference_start
         detections = []
 
         if not results:
+            logger.debug("[INFERENCE] No result object returned (%.3fs)",
+                         inference_seconds)
             return detections
 
         result = results[0]
@@ -281,6 +307,8 @@ class VideoProcessor:
         boxes = result.boxes
 
         if boxes is None or len(boxes) == 0:
+            logger.debug("[INFERENCE] No person boxes returned (%.3fs)",
+                         inference_seconds)
             return detections
 
         xyxy = boxes.xyxy.cpu().numpy()
@@ -329,6 +357,15 @@ class VideoProcessor:
                 "class_id": class_id,
 
             })
+
+        logger.debug(
+            "[INFERENCE] %.3fs | raw_boxes=%s | person_detections=%s | "
+            "tracked_ids=%s",
+            inference_seconds,
+            len(xyxy),
+            len(detections),
+            sum(1 for item in detections if item["track_id"] is not None),
+        )
 
         return detections
 
@@ -479,6 +516,9 @@ class VideoProcessor:
                 "Unable to initialize MP4 video writer."
             )
 
+        logger.info("[OUTPUT] OpenCV writer initialized: %s | codec=mp4v | "
+                    "fps=%.2f | resolution=%sx%s",
+                    output_path, fps, width, height)
         return writer
 
     # ========================================================
@@ -554,9 +594,8 @@ class VideoProcessor:
                 str(output_path),
             ])
 
-            logger.info(
-                "Converting output video to H.264"
-            )
+            logger.info("[ENCODE] Starting FFmpeg H.264 conversion")
+            logger.info("[ENCODE] Input=%s | Output=%s", input_path, output_path)
 
             subprocess.run(
                 command,
@@ -565,6 +604,8 @@ class VideoProcessor:
                 stderr=subprocess.PIPE,
                 timeout=600,
             )
+
+            logger.info("[ENCODE] FFmpeg process completed successfully")
 
             if (
                 output_path.exists()
@@ -579,12 +620,21 @@ class VideoProcessor:
 
                 return True
 
+        except subprocess.CalledProcessError as exc:
+
+            stderr_text = (
+                exc.stderr.decode("utf-8", errors="replace")
+                if isinstance(exc.stderr, bytes)
+                else str(exc.stderr or "")
+            )
+            logger.exception("[ENCODE] FFmpeg H.264 conversion failed")
+            if stderr_text:
+                logger.error("[ENCODE] FFmpeg stderr (last 4000 chars): %s",
+                             stderr_text[-4000:])
+
         except Exception as exc:
 
-            logger.warning(
-                "H.264 conversion unavailable: %s",
-                exc,
-            )
+            logger.exception("[ENCODE] H.264 conversion unavailable: %s", exc)
 
         # Fallback: retain intermediate MP4
         if input_path.exists():
@@ -647,6 +697,9 @@ class VideoProcessor:
             "average_confidence",
         ]
 
+        logger.info("[CSV] Writing %s frame records to %s",
+                    len(records), csv_path)
+
         with csv_path.open(
             "w",
             newline="",
@@ -662,10 +715,9 @@ class VideoProcessor:
 
             writer.writerows(records)
 
-        logger.info(
-            "CSV analytics saved: %s",
-            csv_path,
-        )
+        csv_size = csv_path.stat().st_size if csv_path.exists() else 0
+        logger.info("[CSV] Analytics saved: %s | records=%s | size=%.2f KB",
+                    csv_path, len(records), csv_size / 1024)
 
     # ========================================================
     # 10. PROCESS VIDEO
@@ -717,9 +769,19 @@ class VideoProcessor:
                 "Frame interval must be at least 1."
             )
 
+        logger.info("=" * 72)
+        logger.info("[REQUEST] Video processing requested")
+        logger.info("[REQUEST] Input=%s | size=%.2f MB",
+                    input_video, input_video.stat().st_size / (1024 * 1024))
+        logger.info("[REQUEST] Output=%s | confidence=%.3f | frame_interval=%s",
+                    output_video, float(confidence), int(frame_interval))
+        logger.info("[REQUEST] CSV destination=%s", csv_path)
+
         # Lock model/tracker during processing.
         # Avoid concurrent calls corrupting tracker state.
+        logger.info("[LOCK] Waiting for video processor lock")
         with self.lock:
+            logger.info("[LOCK] Processor lock acquired")
 
             return self._process_video(
                 input_video,
@@ -765,11 +827,28 @@ class VideoProcessor:
 
         last_detections = []
 
+        inference_total_seconds = 0.0
+        frame_read_seconds = 0.0
+        output_write_seconds = 0.0
+        progress_interval = 25
+        last_progress_time = start_time
+        last_progress_frame = 0
+
+        logger.info("=" * 72)
+        logger.info("[PIPELINE START] YOLO11 + ByteTrack video processing")
+        logger.info("[CONFIG] confidence=%.3f | frame_interval=%s | imgsz=%s | tracker=%s",
+                    confidence, frame_interval, self.imgsz, self.tracker)
+        logger.info("[FILES] input=%s | output=%s | temp=%s | csv=%s",
+                    input_video, output_video, temp_output, csv_path)
+
         try:
 
             # ------------------------------------------------
             # A. READ VIDEO
             # ------------------------------------------------
+
+            stage_start = time.perf_counter()
+            logger.info("[STAGE 1/8] Reading video metadata")
 
             video_info = self.get_video_info(
                 input_video
@@ -782,10 +861,12 @@ class VideoProcessor:
 
             total_frames = video_info["frame_count"]
 
-            logger.info(
-                "Input video: %s",
-                video_info,
-            )
+            logger.info("[VIDEO INFO] %s", video_info)
+            logger.info("[STAGE 1/8 COMPLETE] Metadata read in %.3fs",
+                        time.perf_counter() - stage_start)
+
+            stage_start = time.perf_counter()
+            logger.info("[STAGE 2/8] Opening video capture")
 
             capture = cv2.VideoCapture(
                 str(input_video)
@@ -797,9 +878,14 @@ class VideoProcessor:
                     "OpenCV cannot open input video."
                 )
 
+            logger.info("[VIDEO INPUT] OpenCV capture opened successfully")
+
             # ------------------------------------------------
             # B. CREATE OUTPUT WRITER
             # ------------------------------------------------
+
+            stage_start = time.perf_counter()
+            logger.info("[STAGE 3/8] Creating temporary output video writer")
 
             output_video.parent.mkdir(
                 parents=True,
@@ -816,16 +902,23 @@ class VideoProcessor:
                 width,
                 height,
             )
+            logger.info("[STAGE 3/8 COMPLETE] Output writer ready in %.3fs",
+                        time.perf_counter() - stage_start)
 
             # ------------------------------------------------
             # C. RESET TRACKER
             # ------------------------------------------------
 
+            stage_start = time.perf_counter()
+            logger.info("[STAGE 4/8] Resetting tracker state")
             self.reset_tracker()
+            logger.info("[STAGE 4/8 COMPLETE] Tracker reset check finished in %.3fs",
+                        time.perf_counter() - stage_start)
 
-            logger.info(
-                "Starting frame-by-frame processing"
-            )
+            logger.info("[STAGE 5/8] Starting frame-by-frame processing | "
+                        "total_frames=%s | expected_inference_frames=%s",
+                        total_frames,
+                        (total_frames + frame_interval - 1) // frame_interval)
 
             # ------------------------------------------------
             # D. PROCESS FRAMES
@@ -835,9 +928,12 @@ class VideoProcessor:
 
             while True:
 
+                read_start = time.perf_counter()
                 success, frame = capture.read()
+                frame_read_seconds += time.perf_counter() - read_start
 
                 if not success:
+                    logger.info("[VIDEO READ] End of stream at frame %s", frame_number)
                     break
 
                 frame_number += 1
@@ -852,10 +948,13 @@ class VideoProcessor:
 
                 if inference_performed:
 
+                    inference_start = time.perf_counter()
                     detections = self.detect_and_track(
                         frame,
                         confidence,
                     )
+                    current_inference_seconds = time.perf_counter() - inference_start
+                    inference_total_seconds += current_inference_seconds
 
                     last_detections = detections
 
@@ -908,9 +1007,11 @@ class VideoProcessor:
                 # WRITE OUTPUT FRAME
                 # --------------------------------------------
 
+                write_start = time.perf_counter()
                 writer.write(
                     annotated_frame
                 )
+                output_write_seconds += time.perf_counter() - write_start
 
                 processed_frames += 1
 
@@ -971,29 +1072,82 @@ class VideoProcessor:
                 # LOGGING
                 # --------------------------------------------
 
-                if frame_number % 100 == 0:
+                if (
+                    frame_number == 1
+                    or frame_number % progress_interval == 0
+                    or frame_number == total_frames
+                ):
+                    now = time.perf_counter()
+                    elapsed = now - start_time
+                    interval_elapsed = now - last_progress_time
+                    interval_frames = frame_number - last_progress_frame
 
                     progress = (
-                        frame_number / total_frames
-                    ) * 100
+                        frame_number / total_frames * 100
+                        if total_frames else 0.0
+                    )
+                    processing_fps = (
+                        processed_frames / elapsed if elapsed > 0 else 0.0
+                    )
+                    remaining_frames = max(total_frames - frame_number, 0)
+                    eta_seconds = (
+                        remaining_frames / processing_fps
+                        if processing_fps > 0 else 0.0
+                    )
+                    current_ids = [
+                        item["track_id"] for item in detections
+                        if item["track_id"] is not None
+                    ]
 
                     logger.info(
-                        "Processing: %.1f%% | Frame %s/%s | People: %s",
+                        "[PROGRESS] %.1f%% | frame=%s/%s | "
+                        "people_in_frame=%s | tracked_ids=%s | "
+                        "unique_ids_so_far=%s | detections_total=%s | "
+                        "inference_frames=%s | speed=%.2f frames/sec | "
+                        "elapsed=%.1fs | ETA=%.1fs",
                         progress,
                         frame_number,
                         total_frames,
                         people_count,
+                        current_ids[:20],
+                        len(unique_people),
+                        detection_count,
+                        inference_frames,
+                        processing_fps,
+                        elapsed,
+                        eta_seconds,
                     )
+                    logger.info(
+                        "[PERFORMANCE] last_%s_frames_in_%.2fs | "
+                        "avg_inference=%.3fs | read_total=%.2fs | write_total=%.2fs",
+                        interval_frames,
+                        interval_elapsed,
+                        (inference_total_seconds / inference_frames)
+                        if inference_frames else 0.0,
+                        frame_read_seconds,
+                        output_write_seconds,
+                    )
+
+                    last_progress_time = now
+                    last_progress_frame = frame_number
 
             # ------------------------------------------------
             # E. RELEASE VIDEO HANDLES
             # ------------------------------------------------
 
+            logger.info("[STAGE 5/8 COMPLETE] Frame loop finished | "
+                        "frames_read=%s | frames_written=%s | "
+                        "inference_frames=%s | detections=%s | unique_ids=%s",
+                        frame_number, processed_frames, inference_frames,
+                        detection_count, len(unique_people))
+
+            logger.info("[VIDEO RELEASE] Releasing OpenCV capture and writer")
             capture.release()
             capture = None
 
             writer.release()
             writer = None
+            logger.info("[VIDEO RELEASE] Handles released successfully")
 
             if processed_frames == 0:
 
@@ -1005,11 +1159,16 @@ class VideoProcessor:
             # F. GENERATE FINAL VIDEO
             # ------------------------------------------------
 
-            self.convert_to_h264(
+            stage_start = time.perf_counter()
+            logger.info("[STAGE 6/8] Converting intermediate MP4 to final H.264 MP4")
+            h264_success = self.convert_to_h264(
                 temp_output,
                 output_video,
                 input_video,
             )
+            logger.info("[STAGE 6/8 COMPLETE] Final video conversion finished in %.2fs | "
+                        "h264_conversion=%s",
+                        time.perf_counter() - stage_start, h264_success)
 
             if not output_video.exists():
 
@@ -1021,10 +1180,14 @@ class VideoProcessor:
             # G. GENERATE CSV
             # ------------------------------------------------
 
+            stage_start = time.perf_counter()
+            logger.info("[STAGE 7/8] Generating CSV analytics")
             self.write_csv(
                 csv_path,
                 records,
             )
+            logger.info("[STAGE 7/8 COMPLETE] CSV generation finished in %.3fs",
+                        time.perf_counter() - stage_start)
 
             # ------------------------------------------------
             # H. CALCULATE ANALYTICS
@@ -1133,22 +1296,32 @@ class VideoProcessor:
 
             }
 
-            logger.info(
-                "VIDEO PROCESSING COMPLETED"
-            )
-
-            logger.info(
-                "Analytics: %s",
-                analytics,
-            )
+            logger.info("[STAGE 8/8 COMPLETE] Analytics calculated")
+            logger.info("[OUTPUT CHECK] video_exists=%s | video_size=%.2f MB | "
+                        "csv_exists=%s",
+                        output_video.exists(),
+                        output_video.stat().st_size / (1024 * 1024),
+                        bool(csv_path and csv_path.exists()))
+            logger.info("[SUMMARY] frames=%s/%s | inference_frames=%s | "
+                        "total_detections=%s | unique_track_ids=%s | "
+                        "avg_inference=%.3fs | processing_fps=%.2f",
+                        processed_frames, total_frames, inference_frames,
+                        detection_count, len(unique_people),
+                        (inference_total_seconds / inference_frames)
+                        if inference_frames else 0.0,
+                        processing_fps)
+            logger.info("[PIPELINE COMPLETE] Total processing time=%.2fs",
+                        elapsed_time)
+            logger.info("Analytics: %s", analytics)
+            logger.info("=" * 72)
 
             return analytics
 
         except Exception as exc:
 
-            logger.exception(
-                "Video processing error"
-            )
+            logger.exception("[PIPELINE FAILED] Video processing error at frame=%s "
+                             "| processed_frames=%s | inference_frames=%s",
+                             processed_frames, processed_frames, inference_frames)
 
             output_video.unlink(
                 missing_ok=True
@@ -1157,6 +1330,8 @@ class VideoProcessor:
             raise
 
         finally:
+
+            logger.info("[CLEANUP] Releasing remaining resources and temporary files")
 
             if capture is not None:
                 capture.release()
@@ -1167,6 +1342,7 @@ class VideoProcessor:
             temp_output.unlink(
                 missing_ok=True
             )
+            logger.info("[CLEANUP] Cleanup finished")
 
 
 # ============================================================
