@@ -1,70 +1,115 @@
 
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 
-<head>
-  <meta charset="UTF-8" />
+  <head>
+    <!-- Character Encoding -->
+    <meta charset="UTF-8" />
 
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
-  />
+    <!-- Responsive Layout -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
 
-  <meta
-    name="theme-color"
-    content="#0f172a"
-  />
+    <!-- Browser Theme -->
+    <meta
+      name="theme-color"
+      content="#f4f6fa"
+    />
 
-  <meta
-    name="description"
-    content="PragyanAI People Detection and Counting System powered by YOLO11 TensorFlow Lite, ByteTrack and AI video analytics."
-  />
+    <!-- SEO Description -->
+    <meta
+      name="description"
+      content="PragyanAI People Detection and Counting Dashboard powered by YOLO11 TensorFlow Lite, ByteTrack and OpenCV."
+    />
 
-  <meta
-    name="keywords"
-    content="PragyanAI, People Detection, People Counting, YOLO11, TensorFlow Lite, ByteTrack, AI Video Analytics"
-  />
+    <!-- Application Title -->
+    <title>
+      PragyanAI | People Detection &amp; Counting
+    </title>
 
-  <meta
-    name="author"
-    content="PragyanAI"
-  />
+    <!-- Favicon -->
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/favicon.svg"
+    />
 
-  <title>
-    PragyanAI | People Detection & Counting
-  </title>
+    <!-- Preconnect for Google Fonts -->
+    <link
+      rel="preconnect"
+      href="https://fonts.googleapis.com"
+    />
 
-  <link
-    rel="icon"
-    type="image/svg+xml"
-    href="/favicon.svg"
-  />
+    <link
+      rel="preconnect"
+      href="https://fonts.gstatic.com"
+      crossorigin
+    />
 
-  <!-- Google Fonts: Inter -->
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <!-- Inter Font -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
 
-  <link
-    rel="preconnect"
-    href="https://fonts.gstatic.com"
-    crossorigin
-  />
+  </head>
 
-  <link
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-    rel="stylesheet"
-  />
+  <body>
 
-</head>
+    <!-- React Application Root -->
+    <div id="root">
 
-<body>
+      <!-- Visible fallback while React loads -->
+      <div
+        style="
+          min-height: 100vh;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-direction: column;
+          gap: 12px;
+          font-family: Inter, Arial, sans-serif;
+          color: #172033;
+          background: #f4f6fa;
+        "
+      >
 
-  <div id="root"></div>
+        <div
+          style="
+            width: 46px;
+            height: 46px;
+            border-radius: 13px;
+            display: grid;
+            place-items: center;
+            color: white;
+            background: #3157d5;
+            font-size: 23px;
+            font-weight: 800;
+          "
+        >
+          P
+        </div>
 
-  <script
-    type="module"
-    src="/src/main.jsx"
-  ></script>
+        <strong>
+          PragyanAI
+        </strong>
 
-</body>
+        <span style="font-size: 13px; color: #68758a;">
+          Loading People Detection Dashboard...
+        </span>
+
+      </div>
+
+    </div>
+
+    <!-- React Entry Point -->
+    <script
+      type="module"
+      src="/src/main.jsx"
+    ></script>
+
+  </body>
 
 </html>
