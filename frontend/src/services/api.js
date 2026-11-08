@@ -1,7 +1,3 @@
-
-/*
-========================================================
- P
 /*
 ===========================================================
 PragyanAI - People Detection & Counting
@@ -24,10 +20,11 @@ Features:
     1. Backend health check
     2. Model readiness check
     3. Video upload
-    4. Video processing
-    5. Processing results
-    6. Output URL handling
-    7. MP4, CSV and JSON downloads
+    4. Asynchronous video processing
+    5. Job status polling
+    6. Processing results
+    7. Output URL handling
+    8. MP4, CSV and JSON downloads
 ===========================================================
 */
 
@@ -52,6 +49,7 @@ export const API_CONFIG = {
   ROOT_URL: API_BASE_URL,
   MODEL_INFO_URL: `${API_URL}/model-info`,
   PROCESS_URL: `${API_URL}/process`,
+  JOBS_URL: `${API_URL}/jobs`,
   OUTPUTS_URL: `${API_URL}/outputs`,
   MAX_UPLOAD_SIZE: 500 * 1024 * 1024,
   ALLOWED_EXTENSIONS: [
@@ -294,8 +292,12 @@ export const validateVideoFile = (file) => {
 
 
 // =========================================================
-// 7. PROCESS VIDEO
+// 7. PROCESS VIDEO - ASYNCHRONOUS JOB
 // =========================================================
+
+const sleep = (milliseconds) =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 
 export const processVideo = async (
   file,
@@ -304,121 +306,302 @@ export const processVideo = async (
   onProgress = null
 ) => {
 
+  // -------------------------------------------------------
+  // 7.1 Validate video
+  // -------------------------------------------------------
+
+  validateVideoFile(file);
+
+
+  // -------------------------------------------------------
+  // 7.2 Validate confidence
+  // -------------------------------------------------------
+
+  if (
+    !Number.isFinite(Number(confidence)) ||
+    Number(confidence) < 0 ||
+    Number(confidence) > 1
+  ) {
+    throw new Error(
+      "Confidence must be between 0 and 1."
+    );
+  }
+
+
+  // -------------------------------------------------------
+  // 7.3 Validate frame interval
+  // -------------------------------------------------------
+
+  if (
+    !Number.isInteger(Number(frameInterval)) ||
+    Number(frameInterval) < 1
+  ) {
+    throw new Error(
+      "Frame interval must be a positive integer."
+    );
+  }
+
+
+  // -------------------------------------------------------
+  // 7.4 Prepare multipart request
+  // -------------------------------------------------------
+
+  const formData = new FormData();
+
+  formData.append("file", file);
+
+  formData.append(
+    "confidence",
+    String(confidence)
+  );
+
+  formData.append(
+    "frame_interval",
+    String(frameInterval)
+  );
+
+
+  if (onProgress) {
+    onProgress(5);
+  }
+
+
+  console.info(
+    "Creating PragyanAI video-processing job:",
+    file.name
+  );
+
+
+  // -------------------------------------------------------
+  // 7.5 Create processing job
+  // -------------------------------------------------------
+
+  let createResponse;
+
   try {
 
-    // Validate video
-    validateVideoFile(file);
-
-    // Validate confidence
-    if (
-      !Number.isFinite(Number(confidence)) ||
-      Number(confidence) < 0 ||
-      Number(confidence) > 1
-    ) {
-      throw new Error(
-        "Confidence must be between 0 and 1."
-      );
-    }
-
-    // Validate frame interval
-    if (
-      !Number.isInteger(Number(frameInterval)) ||
-      Number(frameInterval) < 1
-    ) {
-      throw new Error(
-        "Frame interval must be a positive integer."
-      );
-    }
-
-    // Prepare multipart request
-    const formData = new FormData();
-
-    formData.append("file", file);
-
-    formData.append(
-      "confidence",
-      String(confidence)
-    );
-
-    formData.append(
-      "frame_interval",
-      String(frameInterval)
-    );
-
-    console.info(
-      "Uploading video to PragyanAI backend:",
-      file.name
-    );
-
-    if (onProgress) {
-      // This is a processing-state indicator,
-      // not actual upload progress.
-      onProgress(10);
-    }
-
-    // Send request
-    const response = await fetch(
-      API_CONFIG.PROCESS_URL,
+    createResponse = await fetch(
+      API_CONFIG.JOBS_URL,
       {
         method: "POST",
         body: formData,
       }
     );
 
-    const result = await parseResponse(response);
-
-    if (!result.success) {
-      throw new Error(
-        result.message ||
-        "Video processing was unsuccessful."
-      );
-    }
-
-    console.info(
-      "Video processing completed:",
-      result
-    );
-
-    if (onProgress) {
-      onProgress(100);
-    }
-
-    // Normalize output URLs
-    return {
-      ...result,
-
-      video_url: getFileUrl(
-        result.video_url
-      ),
-
-      csv_url: getFileUrl(
-        result.csv_url
-      ),
-
-      json_url: getFileUrl(
-        result.json_url
-      ),
-
-      analytics:
-        result.analytics ||
-        result.summary ||
-        {},
-
-      summary:
-        result.summary ||
-        result.analytics ||
-        {},
-    };
-
   } catch (error) {
 
-    console.error(
-      "Video processing error:",
-      error
+    throw new Error(
+      `Could not reach the backend while uploading the video. Check the Render service and network connection. ${error.message || ""}`
     );
 
-    throw error;
   }
+
+
+  const createdJob = await parseResponse(
+    createResponse
+  );
+
+
+  if (!createdJob?.job_id) {
+
+    throw new Error(
+      "Backend did not return a valid processing job ID."
+    );
+
+  }
+
+
+  const jobId = createdJob.job_id;
+
+
+  console.info(
+    "PragyanAI job created:",
+    jobId
+  );
+
+
+  if (onProgress) {
+    onProgress(
+      createdJob.progress ?? 5
+    );
+  }
+
+
+  // -------------------------------------------------------
+  // 7.6 Poll job status
+  // -------------------------------------------------------
+
+  const pollIntervalMs = 2000;
+
+  const maxWaitMs =
+    3 * 60 * 60 * 1000;
+
+  const startedAt = Date.now();
+
+  let transientFailures = 0;
+
+
+  while (
+    Date.now() - startedAt < maxWaitMs
+  ) {
+
+    await sleep(pollIntervalMs);
+
+    let statusResponse;
+
+
+    // -----------------------------------------------------
+    // Request job status
+    // -----------------------------------------------------
+
+    try {
+
+      statusResponse = await fetch(
+        `${API_CONFIG.JOBS_URL}/${encodeURIComponent(jobId)}`,
+        {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+          },
+          cache: "no-store",
+        }
+      );
+
+      transientFailures = 0;
+
+    } catch (error) {
+
+      transientFailures += 1;
+
+      console.warn(
+        `Job status polling network error (${transientFailures}/5):`,
+        error
+      );
+
+
+      if (transientFailures >= 5) {
+
+        throw new Error(
+          "Lost connection to the backend while checking job progress. The job may still be running; check the Render service before submitting the video again."
+        );
+
+      }
+
+      continue;
+
+    }
+
+
+    const status = await parseResponse(
+      statusResponse
+    );
+
+
+    // -----------------------------------------------------
+    // Update frontend progress
+    // -----------------------------------------------------
+
+    if (onProgress) {
+
+      onProgress(
+        status.status === "completed"
+          ? 100
+          : status.status === "queued"
+            ? Math.max(
+                5,
+                Number(status.progress) || 5
+              )
+            : Math.max(
+                10,
+                Number(status.progress) || 10
+              )
+      );
+
+    }
+
+
+    // -----------------------------------------------------
+    // Failed job
+    // -----------------------------------------------------
+
+    if (status.status === "failed") {
+
+      throw new Error(
+        status.error ||
+        status.message ||
+        "Video processing failed."
+      );
+
+    }
+
+
+    // -----------------------------------------------------
+    // Completed job
+    // -----------------------------------------------------
+
+    if (status.status === "completed") {
+
+      const result = status.result;
+
+
+      if (!result?.success) {
+
+        throw new Error(
+          "The job completed but the backend returned no valid result."
+        );
+
+      }
+
+
+      console.info(
+        "PragyanAI video processing completed:",
+        result
+      );
+
+
+      return {
+
+        ...result,
+
+        job_id: jobId,
+
+        video_url: getFileUrl(
+          result.video_url
+        ),
+
+        csv_url: getFileUrl(
+          result.csv_url
+        ),
+
+        json_url: getFileUrl(
+          result.json_url
+        ),
+
+        analytics:
+          result.analytics ||
+          result.summary ||
+          {},
+
+        summary:
+          result.summary ||
+          result.analytics ||
+          {},
+
+      };
+
+    }
+
+  }
+
+
+  // -------------------------------------------------------
+  // 7.7 Processing timeout
+  // -------------------------------------------------------
+
+  throw new Error(
+    `Video processing is taking longer than expected. Job ID: ${jobId}. Check the job status before submitting the same video again.`
+  );
+
 };
 
 
@@ -426,21 +609,33 @@ export const processVideo = async (
 // 8. PROCESSING RESULTS
 // =========================================================
 
-export const getProcessingResults = async (jobId) => {
+export const getProcessingResults = async (
+  jobId
+) => {
 
   if (!jobId) {
+
     throw new Error(
       "Job ID is required."
     );
+
   }
 
-  // The current backend does not expose a
-  // job-specific results endpoint.
-  // Results are returned directly by /api/process.
 
-  throw new Error(
-    "Job-specific results retrieval is not implemented in the current backend."
+  const response = await fetch(
+    `${API_CONFIG.JOBS_URL}/${encodeURIComponent(jobId)}/analytics`,
+    {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    }
   );
+
+
+  return parseResponse(response);
+
 };
 
 
@@ -454,6 +649,7 @@ export const getFileUrl = (url) => {
     return null;
   }
 
+
   if (
     url.startsWith("http://") ||
     url.startsWith("https://")
@@ -461,9 +657,11 @@ export const getFileUrl = (url) => {
     return url;
   }
 
+
   return `${API_BASE_URL}${
     url.startsWith("/") ? "" : "/"
   }${url}`;
+
 };
 
 
@@ -477,30 +675,39 @@ export const downloadFile = async (
 ) => {
 
   if (!fileUrl) {
+
     throw new Error(
       "Download URL is not available."
     );
+
   }
+
 
   const url = getFileUrl(fileUrl);
 
   const response = await fetch(url);
 
+
   if (!response.ok) {
+
     throw new Error(
       `Download failed with HTTP ${response.status}`
     );
+
   }
+
 
   const blob = await response.blob();
 
   const objectUrl = URL.createObjectURL(blob);
+
 
   try {
 
     const link = document.createElement("a");
 
     link.href = objectUrl;
+
     link.download = filename;
 
     document.body.appendChild(link);
@@ -517,6 +724,7 @@ export const downloadFile = async (
     }, 1000);
 
   }
+
 };
 
 
@@ -532,6 +740,7 @@ export const downloadProcessedVideo = async (
     videoUrl,
     "pragyanai_people_detection.mp4"
   );
+
 };
 
 
@@ -547,6 +756,7 @@ export const downloadCSVReport = async (
     csvUrl,
     "pragyanai_people_analytics.csv"
   );
+
 };
 
 
@@ -562,6 +772,7 @@ export const downloadJSONReport = async (
     jsonUrl,
     "pragyanai_people_analytics.json"
   );
+
 };
 
 
@@ -581,7 +792,9 @@ export const getOutputFiles = async () => {
     }
   );
 
+
   return parseResponse(response);
+
 };
 
 
@@ -594,10 +807,13 @@ export const deleteOutputFile = async (
 ) => {
 
   if (!filename) {
+
     throw new Error(
       "Filename is required."
     );
+
   }
+
 
   const response = await fetch(
     `${API_CONFIG.OUTPUTS_URL}/${encodeURIComponent(filename)}`,
@@ -606,7 +822,9 @@ export const deleteOutputFile = async (
     }
   );
 
+
   return parseResponse(response);
+
 };
 
 
@@ -618,14 +836,23 @@ export const testBackendConnection = async () => {
 
   const result = await healthCheck();
 
+
   return {
+
     success: result.connected,
+
     connected: result.connected,
+
     model_loaded: result.model_loaded,
+
     model_status: result.model_status,
+
     message: result.message,
+
     details: result,
+
   };
+
 };
 
 
@@ -634,22 +861,38 @@ export const testBackendConnection = async () => {
 // =========================================================
 
 const api = {
+
   API_CONFIG,
+
   healthCheck,
+
   getBackendStatus,
+
   getModelInfo,
+
   validateVideoFile,
+
   processVideo,
+
   getProcessingResults,
+
   getFileUrl,
+
   downloadFile,
+
   downloadProcessedVideo,
+
   downloadCSVReport,
+
   downloadJSONReport,
+
   getOutputFiles,
+
   deleteOutputFile,
+
   testBackendConnection,
+
 };
 
-export default api;
 
+export default api;
