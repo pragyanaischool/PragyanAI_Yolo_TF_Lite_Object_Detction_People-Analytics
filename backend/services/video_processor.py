@@ -1,4 +1,3 @@
-
 """
 PragyanAI - People Detection & Counting
 Video Processing Engine
