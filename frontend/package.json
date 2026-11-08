@@ -1,9 +1,9 @@
-
 {
   "name": "pragyanai-people-detection-counting",
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "description": "AI-powered people detection and counting using YOLO11 TFLite and ByteTrack.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
