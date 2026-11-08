@@ -1,0 +1,311 @@
+
+import React, { useRef, useState } from "react";
+import {
+  Upload,
+  Video,
+  FileVideo,
+  X,
+  CheckCircle,
+  AlertCircle
+} from "lucide-react";
+
+// --------------------------------------------------
+// Configuration
+// --------------------------------------------------
+
+const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
+
+const SUPPORTED_EXTENSIONS = [
+  "mp4",
+  "avi",
+  "mov",
+  "mkv",
+  "webm"
+];
+
+// --------------------------------------------------
+// Helper: Format File Size
+// --------------------------------------------------
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) {
+    return `${bytes} Bytes`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(2)} KB`;
+  }
+
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+// --------------------------------------------------
+// Helper: Validate Video
+// --------------------------------------------------
+
+function validateVideo(file) {
+  if (!file) {
+    return "Please select a video file.";
+  }
+
+  const extension = file.name
+    .split(".")
+    .pop()
+    .toLowerCase();
+
+  if (!SUPPORTED_EXTENSIONS.includes(extension)) {
+    return "Unsupported video format. Please upload MP4, AVI, MOV, MKV or WebM.";
+  }
+
+  if (file.size === 0) {
+    return "The selected video file is empty.";
+  }
+
+  if (file.size > MAX_FILE_SIZE) {
+    return "File size exceeds the maximum allowed limit of 500 MB.";
+  }
+
+  return null;
+}
+
+// --------------------------------------------------
+// Main Video Upload Component
+// --------------------------------------------------
+
+function VideoUpload({
+  selectedFile,
+  onFileSelect,
+  disabled = false
+}) {
+  const fileInputRef = useRef(null);
+
+  const [isDragging, setIsDragging] = useState(false);
+  const [error, setError] = useState("");
+
+  // ------------------------------------------------
+  // Handle File Selection
+  // ------------------------------------------------
+
+  const handleFile = (file) => {
+    if (disabled) return;
+
+    setError("");
+
+    const validationError = validateVideo(file);
+
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
+    onFileSelect(file);
+  };
+
+  // ------------------------------------------------
+  // Browse Files
+  // ------------------------------------------------
+
+  const handleBrowse = () => {
+    if (disabled) return;
+
+    fileInputRef.current?.click();
+  };
+
+  // ------------------------------------------------
+  // Input Change
+  // ------------------------------------------------
+
+  const handleInputChange = (event) => {
+    const file = event.target.files?.[0];
+
+    if (file) {
+      handleFile(file);
+    }
+
+    // Allow selecting the same file again
+    event.target.value = "";
+  };
+
+  // ------------------------------------------------
+  // Drag Events
+  // ------------------------------------------------
+
+  const handleDragOver = (event) => {
+    event.preventDefault();
+
+    if (!disabled) {
+      setIsDragging(true);
+    }
+  };
+
+  const handleDragLeave = (event) => {
+    event.preventDefault();
+
+    if (!event.currentTarget.contains(event.relatedTarget)) {
+      setIsDragging(false);
+    }
+  };
+
+  const handleDrop = (event) => {
+    event.preventDefault();
+
+    setIsDragging(false);
+
+    if (disabled) return;
+
+    const file = event.dataTransfer.files?.[0];
+
+    if (!file) {
+      setError("No file was selected.");
+      return;
+    }
+
+    handleFile(file);
+  };
+
+  // ------------------------------------------------
+  // Remove Selected File
+  // ------------------------------------------------
+
+  const handleRemove = () => {
+    if (disabled) return;
+
+    onFileSelect(null);
+    setError("");
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  // ------------------------------------------------
+  // Render
+  // ------------------------------------------------
+
+  return (
+    <section
+      className={`upload-card ${isDragging ? "drag-active" : ""}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+
+      <div className="upload-content">
+
+        {/* Upload Icon */}
+        <div className="upload-icon">
+          <Upload size={30} strokeWidth={1.8} />
+        </div>
+
+        <h2>Upload Your Video</h2>
+
+        <p>
+          Drag and drop your video here or browse files
+          from your computer.
+        </p>
+
+        {/* Browse Button */}
+        <button
+          type="button"
+          className="upload-button"
+          onClick={handleBrowse}
+          disabled={disabled}
+        >
+          <Video size={17} />
+          Browse Video
+        </button>
+
+        {/* Hidden File Input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="upload-input"
+          accept=".mp4,.avi,.mov,.mkv,.webm,video/*"
+          onChange={handleInputChange}
+          disabled={disabled}
+          aria-label="Select video file"
+        />
+
+        <span className="upload-hint">
+          Supported formats: MP4, AVI, MOV, MKV, WebM
+          <br />
+          Maximum file size: 500 MB
+        </span>
+
+      </div>
+
+      {/* Selected File Information */}
+      {selectedFile && (
+        <div className="selected-file">
+
+          <div className="file-information">
+
+            <div className="file-icon">
+              <FileVideo size={25} />
+            </div>
+
+            <div>
+              <div className="file-name">
+                {selectedFile.name}
+              </div>
+
+              <div className="file-size">
+                {formatFileSize(selectedFile.size)}
+              </div>
+            </div>
+
+          </div>
+
+          <div className="file-actions">
+
+            <CheckCircle
+              size={19}
+              color="#16a34a"
+              aria-label="File selected"
+            />
+
+            <button
+              type="button"
+              className="remove-button"
+              onClick={handleRemove}
+              disabled={disabled}
+              aria-label="Remove selected video"
+              title="Remove video"
+            >
+              <X size={15} />
+            </button>
+
+          </div>
+
+        </div>
+      )}
+
+      {/* Validation Error */}
+      {error && (
+        <div
+          className="error-message upload-error"
+          role="alert"
+        >
+          <AlertCircle size={17} />
+
+          <p>{error}</p>
+        </div>
+      )}
+
+      {/* Dragging Indicator */}
+      {isDragging && (
+        <div className="drag-overlay">
+          <Upload size={32} />
+          <strong>Drop your video here</strong>
+        </div>
+      )}
+
+    </section>
+  );
+}
+
+export default VideoUpload;
