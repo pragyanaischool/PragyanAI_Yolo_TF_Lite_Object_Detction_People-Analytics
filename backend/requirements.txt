@@ -8,3 +8,4 @@ opencv-python-headless==4.10.0.84
 pandas==2.2.3
 imageio-ffmpeg
 lap>=0.5.12
+ai-edge-litert>=2.1.4
