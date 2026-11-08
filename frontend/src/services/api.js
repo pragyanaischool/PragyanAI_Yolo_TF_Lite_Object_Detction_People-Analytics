@@ -5,6 +5,10 @@
  * Frontend: React + Vite / Netlify
  */
 
+// =========================================================
+// 1. API CONFIGURATION
+// =========================================================
+
 const DEFAULT_API_URL =
   "https://pragyanai-yolo-tf-lite-object-detction.onrender.com";
 
@@ -27,12 +31,13 @@ export const API_CONFIG = {
   MAX_JOB_WAIT_MS: 3 * 60 * 60 * 1000,
 };
 
-// =====================================================
-// RESPONSE HANDLING
-// =====================================================
+// =========================================================
+// 2. COMMON RESPONSE HANDLER
+// =========================================================
 
 export const parseResponse = async (response) => {
   const contentType = response.headers.get("content-type") || "";
+
   let data;
 
   try {
@@ -59,15 +64,16 @@ export const parseResponse = async (response) => {
     const error = new Error(message);
     error.status = response.status;
     error.response = data;
+
     throw error;
   }
 
   return data;
 };
 
-// =====================================================
-// COMMON API REQUEST
-// =====================================================
+// =========================================================
+// 3. COMMON FETCH REQUEST
+// =========================================================
 
 const request = async (url, options = {}) => {
   let response;
@@ -92,9 +98,9 @@ const request = async (url, options = {}) => {
   return parseResponse(response);
 };
 
-// =====================================================
-// BACKEND HEALTH CHECK
-// =====================================================
+// =========================================================
+// 4. BACKEND HEALTH CHECK
+// =========================================================
 
 export const healthCheck = async () => {
   try {
@@ -108,6 +114,7 @@ export const healthCheck = async () => {
 
     const connected =
       data?.api === "running" ||
+      data?.backend_connected === true ||
       data?.status === "healthy" ||
       data?.status === "degraded" ||
       data?.status === "ok";
@@ -130,8 +137,12 @@ export const healthCheck = async () => {
       model_path: data?.model_path || null,
       model_error: data?.model_error || null,
 
-      detection_engine: data?.detection_engine || "YOLO11",
-      tracking_engine: data?.tracking_engine || "ByteTrack",
+      detection_engine:
+        data?.detection_engine || "YOLO11",
+
+      tracking_engine:
+        data?.tracking_engine || "ByteTrack",
+
       inference_runtime:
         data?.inference_runtime || "TensorFlow Lite",
 
@@ -143,6 +154,7 @@ export const healthCheck = async () => {
 
       raw: data,
     };
+
   } catch (error) {
     return {
       connected: false,
@@ -154,9 +166,11 @@ export const healthCheck = async () => {
       model_exists: null,
       model_path: null,
       model_error: error.message,
+
       detection_engine: "YOLO11",
       tracking_engine: "ByteTrack",
       inference_runtime: "TensorFlow Lite",
+
       message: error.message,
       raw: null,
     };
@@ -165,19 +179,22 @@ export const healthCheck = async () => {
 
 export const getBackendStatus = healthCheck;
 
-// =====================================================
-// MODEL INFORMATION
-// =====================================================
+// =========================================================
+// 5. GET MODEL INFORMATION
+// =========================================================
 
 export const getModelInfo = () =>
-  request(API_CONFIG.MODEL_INFO_URL, {
-    method: "GET",
-    cache: "no-store",
-  });
+  request(
+    API_CONFIG.MODEL_INFO_URL,
+    {
+      method: "GET",
+      cache: "no-store",
+    }
+  );
 
-// =====================================================
-// VIDEO FILE VALIDATION
-// =====================================================
+// =========================================================
+// 6. VIDEO FILE VALIDATION
+// =========================================================
 
 export const validateVideoFile = (file) => {
   if (!file) {
@@ -216,14 +233,14 @@ export const validateVideoFile = (file) => {
   };
 };
 
-// =====================================================
-// CREATE VIDEO PROCESSING JOB
-// =====================================================
+// =========================================================
+// 7. CREATE VIDEO PROCESSING JOB
+// =========================================================
 
 export const createVideoJob = async (
   file,
   confidence = 0.35,
-  frameInterval = 1,
+  frameInterval = 2,
   options = {}
 ) => {
   validateVideoFile(file);
@@ -253,19 +270,28 @@ export const createVideoJob = async (
   const formData = new FormData();
 
   formData.append("file", file);
-  formData.append("confidence", String(confidenceValue));
-  formData.append("frame_interval", String(intervalValue));
+  formData.append(
+    "confidence",
+    String(confidenceValue)
+  );
+  formData.append(
+    "frame_interval",
+    String(intervalValue)
+  );
 
-  return request(API_CONFIG.JOBS_URL, {
-    method: "POST",
-    body: formData,
-    signal: options.signal,
-  });
+  return request(
+    API_CONFIG.JOBS_URL,
+    {
+      method: "POST",
+      body: formData,
+      signal: options.signal,
+    }
+  );
 };
 
-// =====================================================
-// GET JOB STATUS / LIVE UPDATES
-// =====================================================
+// =========================================================
+// 8. GET JOB STATUS
+// =========================================================
 
 export const getJobStatus = async (
   jobId,
@@ -285,9 +311,9 @@ export const getJobStatus = async (
   );
 };
 
-// =====================================================
-// GET JOB ANALYTICS
-// =====================================================
+// =========================================================
+// 9. GET JOB ANALYTICS
+// =========================================================
 
 export const getJobAnalytics = async (
   jobId,
@@ -309,9 +335,9 @@ export const getJobAnalytics = async (
 
 export const getProcessingResults = getJobAnalytics;
 
-// =====================================================
-// POLL JOB UNTIL COMPLETED
-// =====================================================
+// =========================================================
+// 10. POLL VIDEO PROCESSING JOB
+// =========================================================
 
 export const pollVideoJob = async (
   jobId,
@@ -352,7 +378,10 @@ export const pollVideoJob = async (
       onProgress?.(
         Math.max(
           0,
-          Math.min(100, Number(status.progress) || 0)
+          Math.min(
+            100,
+            Number(status.progress) || 0
+          )
         ),
         status
       );
@@ -371,6 +400,7 @@ export const pollVideoJob = async (
           `Job ${status.status}.`
         );
       }
+
     } catch (error) {
       if (error.name === "AbortError") {
         throw error;
@@ -398,7 +428,7 @@ export const pollVideoJob = async (
         throw new Error(
           `Unable to retrieve job status after ${maxConsecutiveErrors} attempts. ` +
           `The job may still be running. Job ID: ${jobId}. ` +
-          "Check Render before resubmitting."
+          `Check Render before resubmitting.`
         );
       }
     }
@@ -413,25 +443,29 @@ export const pollVideoJob = async (
   );
 };
 
-// =====================================================
-// OUTPUT FILE URL
-// =====================================================
+// =========================================================
+// 11. RESOLVE BACKEND FILE URL
+// =========================================================
 
 export const getFileUrl = (url) => {
-  if (!url) return null;
+  if (!url) {
+    return null;
+  }
 
   if (/^https?:\/\//i.test(url)) {
     return url;
   }
 
-  return `${API_BASE_URL}${
-    url.startsWith("/") ? "" : "/"
-  }${url}`;
+  return (
+    `${API_BASE_URL}` +
+    `${url.startsWith("/") ? "" : "/"}` +
+    `${url}`
+  );
 };
 
-// =====================================================
-// DOWNLOAD FILE
-// =====================================================
+// =========================================================
+// 12. DOWNLOAD FILE
+// =========================================================
 
 export const downloadFile = async (
   url,
@@ -440,7 +474,9 @@ export const downloadFile = async (
   const resolvedUrl = getFileUrl(url);
 
   if (!resolvedUrl) {
-    throw new Error("Download URL is not available.");
+    throw new Error(
+      "Download URL is not available."
+    );
   }
 
   const response = await fetch(resolvedUrl);
@@ -461,6 +497,7 @@ export const downloadFile = async (
   anchor.download = filename;
 
   document.body.appendChild(anchor);
+
   anchor.click();
   anchor.remove();
 
@@ -470,9 +507,9 @@ export const downloadFile = async (
   );
 };
 
-// =====================================================
-// DOWNLOAD SPECIFIC OUTPUTS
-// =====================================================
+// =========================================================
+// 13. DOWNLOAD PROCESSED VIDEO
+// =========================================================
 
 export const downloadProcessedVideo = (url) =>
   downloadFile(
@@ -480,11 +517,19 @@ export const downloadProcessedVideo = (url) =>
     "pragyanai_people_detection_processed.mp4"
   );
 
+// =========================================================
+// 14. DOWNLOAD CSV REPORT
+// =========================================================
+
 export const downloadCSVReport = (url) =>
   downloadFile(
     url,
     "pragyanai_people_analytics.csv"
   );
+
+// =========================================================
+// 15. DOWNLOAD JSON REPORT
+// =========================================================
 
 export const downloadJSONReport = (url) =>
   downloadFile(
@@ -492,15 +537,22 @@ export const downloadJSONReport = (url) =>
     "pragyanai_people_analytics.json"
   );
 
-// =====================================================
-// OUTPUT FILE MANAGEMENT
-// =====================================================
+// =========================================================
+// 16. LIST OUTPUT FILES
+// =========================================================
 
 export const getOutputFiles = () =>
-  request(API_CONFIG.OUTPUTS_URL, {
-    method: "GET",
-    cache: "no-store",
-  });
+  request(
+    API_CONFIG.OUTPUTS_URL,
+    {
+      method: "GET",
+      cache: "no-store",
+    }
+  );
+
+// =========================================================
+// 17. DELETE OUTPUT FILE
+// =========================================================
 
 export const deleteOutputFile = (filename) =>
   request(
@@ -510,32 +562,27 @@ export const deleteOutputFile = (filename) =>
     }
   );
 
-// =====================================================
-// DEFAULT API EXPORT
-// =====================================================
+// =========================================================
+// 18. DEFAULT API EXPORT
+// =========================================================
 
 const api = {
   API_CONFIG,
   parseResponse,
-
   healthCheck,
   getBackendStatus,
   getModelInfo,
-
   validateVideoFile,
   createVideoJob,
-
   getJobStatus,
   getJobAnalytics,
   getProcessingResults,
   pollVideoJob,
-
   getFileUrl,
   downloadFile,
   downloadProcessedVideo,
   downloadCSVReport,
   downloadJSONReport,
-
   getOutputFiles,
   deleteOutputFile,
 };
