@@ -1,6 +1,20 @@
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 
+import {
+  Activity,
+  AlertCircle,
+  CheckCircle,
+  RefreshCw,
+  Server,
+  Cpu,
+  Video,
+  Users,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
+
+// Components
 import Header from "./components/Header";
 import VideoUpload from "./components/VideoUpload";
 import VideoPreview from "./components/VideoPreview";
@@ -10,311 +24,1003 @@ import ResultsVideo from "./components/ResultsVideo";
 import AnalyticsCards from "./components/AnalyticsCards";
 import DownloadReport from "./components/DownloadReport";
 
-import { processVideo } from "./services/api";
+// API
+import {
+  healthCheck,
+  processVideo,
+} from "./services/api";
+
+
+// ============================================================
+// APPLICATION CONFIGURATION
+// ============================================================
+
+const APP_CONFIG = {
+  name: "PragyanAI People Detection & Counting",
+
+  backend:
+    "https://pragyanai-yolo-tf-lite-object-detction.onrender.com",
+
+  healthEndpoint: "/health",
+
+  defaultConfidence: 0.35,
+
+  defaultFrameInterval: 1,
+
+  maxFileSize: 500 * 1024 * 1024,
+};
+
+
+// ============================================================
+// APPLICATION
+// ============================================================
 
 function App() {
-  // Uploaded video
+
+  // ----------------------------------------------------------
+  // 1. STATE
+  // ----------------------------------------------------------
+
   const [videoFile, setVideoFile] = useState(null);
 
-  // Detection settings
-  const [confidence, setConfidence] = useState(0.35);
-  const [frameInterval, setFrameInterval] = useState(1);
+  const [confidence, setConfidence] = useState(
+    APP_CONFIG.defaultConfidence
+  );
 
-  // Processing state
+  const [frameInterval, setFrameInterval] = useState(
+    APP_CONFIG.defaultFrameInterval
+  );
+
   const [isProcessing, setIsProcessing] = useState(false);
-  const [processingStatus, setProcessingStatus] = useState("idle");
-  const [error, setError] = useState("");
-  const [progress, setProgress] = useState(0);
 
-  // Backend response
+  const [processingStatus, setProcessingStatus] = useState(
+    "idle"
+  );
+
+  const [processingProgress, setProcessingProgress] = useState(0);
+
+  const [error, setError] = useState("");
+
   const [results, setResults] = useState(null);
 
-  // Handle video selection
-  const handleVideoSelect = (file) => {
-    if (!file) return;
+  const [backendStatus, setBackendStatus] = useState(
+    "checking"
+  );
 
-    setVideoFile(file);
-    setResults(null);
+  const [modelLoaded, setModelLoaded] = useState(false);
+
+  const [backendMessage, setBackendMessage] = useState(
+    "Checking backend connection..."
+  );
+
+
+  // ----------------------------------------------------------
+  // 2. BACKEND HEALTH CHECK
+  // ----------------------------------------------------------
+
+  const checkBackend = useCallback(async () => {
+
+    setBackendStatus("checking");
+
+    setBackendMessage("Connecting to Render backend...");
+
+    try {
+
+      const response = await healthCheck();
+
+      if (response.success) {
+
+        setBackendStatus("connected");
+
+        setModelLoaded(
+          response.modelLoaded === true
+        );
+
+        setBackendMessage(
+          response.modelLoaded
+            ? "Backend connected. Detection model loaded."
+            : "Backend connected, but detection model is not loaded."
+        );
+
+      } else {
+
+        setBackendStatus("disconnected");
+
+        setModelLoaded(false);
+
+        setBackendMessage(
+          response.error || "Backend connection failed."
+        );
+
+      }
+
+    } catch (err) {
+
+      setBackendStatus("disconnected");
+
+      setModelLoaded(false);
+
+      setBackendMessage(err.message);
+
+    }
+
+  }, []);
+
+
+  // ----------------------------------------------------------
+  // 3. INITIAL BACKEND CHECK
+  // ----------------------------------------------------------
+
+  useEffect(() => {
+
+    checkBackend();
+
+  }, [checkBackend]);
+
+
+  // ----------------------------------------------------------
+  // 4. FILE SELECTION
+  // ----------------------------------------------------------
+
+  const handleFileSelect = (file) => {
+
+    if (isProcessing) return;
+
     setError("");
-    setProgress(0);
+
+    setResults(null);
+
+    setProcessingProgress(0);
+
     setProcessingStatus("idle");
-  };
 
-  // Handle detection confidence change
-  const handleConfidenceChange = (value) => {
-    setConfidence(Number(value));
-  };
+    if (!file) {
 
-  // Handle frame interval change
-  const handleFrameIntervalChange = (value) => {
-    setFrameInterval(Number(value));
-  };
+      setVideoFile(null);
 
-  // Process uploaded video
-  const handleProcessVideo = async () => {
-    if (!videoFile) {
-      setError("Please upload a video before starting detection.");
       return;
     }
 
-    try {
-      setIsProcessing(true);
-      setProcessingStatus("processing");
-      setError("");
-      setResults(null);
-      setProgress(10);
+    if (!(file instanceof File)) {
 
-      const response = await processVideo({
-        file: videoFile,
-        confidence,
-        frameInterval
-      });
-
-      setProgress(100);
-      setResults(response);
-      setProcessingStatus("completed");
-    } catch (err) {
-      console.error("Video processing error:", err);
+      setVideoFile(null);
 
       setError(
-        err?.message ||
-        "Unable to process the video. Please check the backend server."
+        "Invalid video file. Please select a video again."
+      );
+
+      return;
+    }
+
+    if (file.size <= 0) {
+
+      setVideoFile(null);
+
+      setError("The selected video file is empty.");
+
+      return;
+    }
+
+    if (file.size > APP_CONFIG.maxFileSize) {
+
+      setVideoFile(null);
+
+      setError(
+        "Video exceeds the maximum allowed size of 500 MB."
+      );
+
+      return;
+    }
+
+    setVideoFile(file);
+
+  };
+
+
+  // ----------------------------------------------------------
+  // 5. RESET APPLICATION
+  // ----------------------------------------------------------
+
+  const resetApplication = () => {
+
+    if (isProcessing) return;
+
+    setVideoFile(null);
+
+    setResults(null);
+
+    setError("");
+
+    setProcessingStatus("idle");
+
+    setProcessingProgress(0);
+
+    setConfidence(
+      APP_CONFIG.defaultConfidence
+    );
+
+    setFrameInterval(
+      APP_CONFIG.defaultFrameInterval
+    );
+
+  };
+
+
+  // ----------------------------------------------------------
+  // 6. PROCESSING FUNCTION
+  // ----------------------------------------------------------
+
+  const handleProcessVideo = async () => {
+
+    if (isProcessing) return;
+
+    setError("");
+
+    setResults(null);
+
+    setProcessingProgress(0);
+
+    // ----------------------------------------
+    // Validate file
+    // ----------------------------------------
+
+    if (!videoFile) {
+
+      setError("Please upload a video first.");
+
+      return;
+    }
+
+    if (!(videoFile instanceof File)) {
+
+      setError(
+        "Invalid video file object. Please select the video again."
+      );
+
+      return;
+    }
+
+    if (backendStatus === "disconnected") {
+
+      setError(
+        "Cannot connect to Render backend. Please check backend availability."
+      );
+
+      return;
+    }
+
+    // ----------------------------------------
+    // Start processing
+    // ----------------------------------------
+
+    setIsProcessing(true);
+
+    setProcessingStatus("processing");
+
+    setProcessingProgress(10);
+
+    try {
+
+      console.info("================================");
+
+      console.info(
+        "PragyanAI People Detection Started"
+      );
+
+      console.info("Video:", videoFile.name);
+
+      console.info("File size:", videoFile.size);
+
+      console.info("Confidence:", confidence);
+
+      console.info("Frame interval:", frameInterval);
+
+      console.info("================================");
+
+      // --------------------------------------
+      // API request
+      // --------------------------------------
+
+      const result = await processVideo(
+        videoFile,
+        confidence,
+        frameInterval
+      );
+
+      // --------------------------------------
+      // Validate response
+      // --------------------------------------
+
+      if (!result || result.success !== true) {
+
+        throw new Error(
+          result?.message ||
+          "Video processing could not be completed."
+        );
+
+      }
+
+      if (!result.video_url) {
+
+        throw new Error(
+          "Processed video URL was not returned by the backend."
+        );
+
+      }
+
+      // --------------------------------------
+      // Store results
+      // --------------------------------------
+
+      setResults(result);
+
+      setProcessingProgress(100);
+
+      setProcessingStatus("completed");
+
+      console.info(
+        "PragyanAI processing completed",
+        result
+      );
+
+    } catch (err) {
+
+      console.error(
+        "Processing failed:",
+        err
+      );
+
+      setError(
+        err.message ||
+        "Video processing failed. Please try again."
       );
 
       setProcessingStatus("failed");
+
+      setProcessingProgress(0);
+
     } finally {
+
       setIsProcessing(false);
+
     }
+
   };
 
-  // Reset the application
-  const handleReset = () => {
-    setVideoFile(null);
-    setResults(null);
-    setError("");
-    setProgress(0);
-    setProcessingStatus("idle");
-    setIsProcessing(false);
-    setConfidence(0.35);
-    setFrameInterval(1);
+
+  // ----------------------------------------------------------
+  // 7. RETRY PROCESSING
+  // ----------------------------------------------------------
+
+  const retryProcessing = () => {
+
+    if (!videoFile) {
+
+      setError("Please upload a video first.");
+
+      return;
+    }
+
+    handleProcessVideo();
+
   };
+
+
+  // ----------------------------------------------------------
+  // 8. STATUS LABELS
+  // ----------------------------------------------------------
+
+  const isBackendConnected =
+    backendStatus === "connected";
+
+  const isBackendReady =
+    isBackendConnected && modelLoaded;
+
+
+  // ----------------------------------------------------------
+  // 9. RENDER APPLICATION
+  // ----------------------------------------------------------
 
   return (
+
     <div className="app-container">
 
-      {/* Application Header */}
+      {/* ================================================
+          HEADER
+      ================================================= */}
+
       <Header />
+
+
+      {/* ================================================
+          MAIN CONTENT
+      ================================================= */}
 
       <main className="main-content">
 
-        {/* Page Introduction */}
+        {/* --------------------------------------------
+            HERO SECTION
+        -------------------------------------------- */}
+
         <section className="hero-section">
-          <div className="hero-badge">
-            <span className="status-dot"></span>
-            AI-Powered Video Analytics
+
+          <div className="hero-content">
+
+            <div className="hero-badge">
+
+              <Activity size={16} />
+
+              AI-POWERED VIDEO ANALYTICS
+
+            </div>
+
+            <h1>
+              People Detection
+              <span> & Counting</span>
+            </h1>
+
+            <p>
+              Upload your video, detect people,
+              track individuals and generate
+              intelligent video analytics using
+              YOLO11 and ByteTrack.
+            </p>
+
           </div>
 
-          <h1>
-            People Detection
-            <span className="gradient-text"> & Counting</span>
-          </h1>
-
-          <p>
-            Upload your video and automatically detect, track, and count
-            people using YOLO11, TensorFlow Lite and ByteTrack.
-          </p>
-
-          <div className="technology-tags">
-            <span>YOLO11</span>
-            <span>TensorFlow Lite</span>
-            <span>ByteTrack</span>
-            <span>FastAPI</span>
-          </div>
         </section>
 
-        {/* Upload and Configuration Section */}
-        <section className="workspace-grid">
 
-          <div className="left-panel">
+        {/* --------------------------------------------
+            BACKEND STATUS
+        -------------------------------------------- */}
 
-            {/* Video Upload */}
-            <VideoUpload
-              selectedFile={videoFile}
-              onFileSelect={handleVideoSelect}
-              disabled={isProcessing}
-            />
+        <section className="backend-status-section">
 
-            {/* Video Preview */}
-            {videoFile && (
-              <VideoPreview
-                file={videoFile}
-                onRemove={() => {
-                  setVideoFile(null);
-                  setResults(null);
-                  setError("");
-                  setProcessingStatus("idle");
-                }}
-                disabled={isProcessing}
-              />
-            )}
+          <div className="backend-status-card">
 
-            {/* Detection Settings */}
-            <DetectionSettings
-              confidence={confidence}
-              frameInterval={frameInterval}
-              onConfidenceChange={handleConfidenceChange}
-              onFrameIntervalChange={handleFrameIntervalChange}
-              disabled={isProcessing}
-            />
+            <div className="backend-status-left">
 
-            {/* Process Button */}
-            <button
-              type="button"
-              className="process-button"
-              onClick={handleProcessVideo}
-              disabled={!videoFile || isProcessing}
-            >
-              {isProcessing ? (
-                <>
-                  <span className="button-spinner"></span>
-                  Processing Video...
-                </>
+              <div
+                className={`backend-status-icon ${
+                  backendStatus
+                }`}
+              >
+
+                {isBackendConnected ? (
+                  <Server size={22} />
+                ) : (
+                  <WifiOff size={22} />
+                )}
+
+              </div>
+
+              <div className="backend-status-text">
+
+                <h3>Backend Connection</h3>
+
+                <p>{backendMessage}</p>
+
+              </div>
+
+            </div>
+
+
+            <div className="backend-status-right">
+
+              <span
+                className={`backend-status-badge ${
+                  backendStatus
+                }`}
+              >
+
+                {backendStatus === "checking"
+                  ? "Checking"
+                  : isBackendConnected
+                  ? "Connected"
+                  : "Disconnected"}
+
+              </span>
+
+              <button
+                type="button"
+                className="refresh-status-button"
+                onClick={checkBackend}
+                disabled={backendStatus === "checking"}
+                title="Refresh backend status"
+              >
+
+                <RefreshCw size={17} />
+
+              </button>
+
+            </div>
+
+          </div>
+
+
+          {/* Engine information */}
+
+          <div className="engine-status-grid">
+
+            <div className="engine-status-item">
+
+              <Cpu size={18} />
+
+              <div>
+
+                <span>Detection Engine</span>
+
+                <strong>YOLO11 TFLite</strong>
+
+              </div>
+
+            </div>
+
+
+            <div className="engine-status-item">
+
+              <Activity size={18} />
+
+              <div>
+
+                <span>Tracking Engine</span>
+
+                <strong>ByteTrack</strong>
+
+              </div>
+
+            </div>
+
+
+            <div className="engine-status-item">
+
+              <Video size={18} />
+
+              <div>
+
+                <span>Video Processing</span>
+
+                <strong>OpenCV</strong>
+
+              </div>
+
+            </div>
+
+
+            <div className="engine-status-item">
+
+              {isBackendReady ? (
+                <Wifi size={18} />
               ) : (
-                <>
-                  <span>▶</span>
-                  Start People Detection
-                </>
+                <WifiOff size={18} />
               )}
-            </button>
 
-            {/* Reset Button */}
+              <div>
+
+                <span>Model Status</span>
+
+                <strong>
+                  {modelLoaded
+                    ? "Loaded"
+                    : "Not Ready"}
+                </strong>
+
+              </div>
+
+            </div>
+
+          </div>
+
+        </section>
+
+
+        {/* ================================================
+            PROCESSING WORKSPACE
+        ================================================= */}
+
+        <section className="workspace-section">
+
+          <div className="workspace-header">
+
+            <div>
+
+              <h2>Video Processing Workspace</h2>
+
+              <p>
+                Upload a video and configure
+                your detection settings.
+              </p>
+
+            </div>
+
             <button
               type="button"
               className="reset-button"
-              onClick={handleReset}
+              onClick={resetApplication}
               disabled={isProcessing}
             >
-              Reset Application
+
+              <RefreshCw size={16} />
+
+              Reset
+
             </button>
 
           </div>
 
-          {/* Processing Information */}
-          <div className="right-panel">
 
-            <div className="panel-heading">
-              <h2>Processing Status</h2>
-              <p>Monitor your video processing activity.</p>
+          <div className="workspace-grid">
+
+            {/* --------------------------------------
+                LEFT COLUMN
+            -------------------------------------- */}
+
+            <div className="workspace-left">
+
+              {/* VIDEO UPLOAD */}
+
+              <VideoUpload
+                selectedFile={videoFile}
+                onFileSelect={handleFileSelect}
+                disabled={isProcessing}
+              />
+
+
+              {/* VIDEO PREVIEW */}
+
+              {videoFile && (
+
+                <VideoPreview
+                  file={videoFile}
+                  onRemove={() => {
+                    handleFileSelect(null);
+                  }}
+                  disabled={isProcessing}
+                />
+
+              )}
+
+
+              {/* DETECTION SETTINGS */}
+
+              <DetectionSettings
+                confidence={confidence}
+                frameInterval={frameInterval}
+                onConfidenceChange={setConfidence}
+                onFrameIntervalChange={setFrameInterval}
+                disabled={isProcessing}
+              />
+
+
+              {/* PROCESS BUTTON */}
+
+              <button
+                type="button"
+                className="process-button"
+                onClick={handleProcessVideo}
+                disabled={
+                  !videoFile ||
+                  isProcessing ||
+                  !isBackendReady
+                }
+              >
+
+                {isProcessing ? (
+
+                  <>
+                    <RefreshCw
+                      size={20}
+                      className="spin"
+                    />
+
+                    Processing Video...
+
+                  </>
+
+                ) : (
+
+                  <>
+
+                    <Activity size={20} />
+
+                    Detect & Count People
+
+                  </>
+
+                )}
+
+              </button>
+
+
+              {/* BACKEND NOT READY */}
+
+              {!isBackendReady && (
+
+                <div className="backend-warning">
+
+                  <AlertCircle size={17} />
+
+                  <span>
+                    {backendStatus === "checking"
+                      ? "Checking backend connection..."
+                      : backendStatus === "disconnected"
+                      ? "Backend is unavailable. Please retry connection."
+                      : "Detection model is not loaded on Render."}
+                  </span>
+
+                </div>
+
+              )}
+
             </div>
 
-            <ProcessingStatus
-              status={processingStatus}
-              progress={progress}
-              error={error}
-            />
 
-            {error && (
-              <div className="error-message" role="alert">
-                <strong>Processing Error</strong>
-                <p>{error}</p>
-              </div>
-            )}
+            {/* --------------------------------------
+                RIGHT COLUMN
+            -------------------------------------- */}
 
-            <div className="workflow-card">
-              <h3>Detection Workflow</h3>
+            <div className="workspace-right">
 
-              <div className="workflow-step">
-                <span className="workflow-number">01</span>
-                <div>
-                  <strong>Video Upload</strong>
-                  <p>Upload your video file.</p>
+              <ProcessingStatus
+                status={processingStatus}
+                progress={processingProgress}
+                error={error}
+              />
+
+              {/* ERROR MESSAGE */}
+
+              {error && (
+
+                <div className="processing-error">
+
+                  <AlertCircle size={20} />
+
+                  <div>
+
+                    <strong>Processing Error</strong>
+
+                    <p>{error}</p>
+
+                  </div>
+
                 </div>
-              </div>
 
-              <div className="workflow-step">
-                <span className="workflow-number">02</span>
-                <div>
-                  <strong>Frame Extraction</strong>
-                  <p>Extract frames from the uploaded video.</p>
-                </div>
-              </div>
+              )}
 
-              <div className="workflow-step">
-                <span className="workflow-number">03</span>
-                <div>
-                  <strong>AI Detection & Tracking</strong>
-                  <p>Detect and track people using YOLO11 and ByteTrack.</p>
-                </div>
-              </div>
 
-              <div className="workflow-step">
-                <span className="workflow-number">04</span>
-                <div>
-                  <strong>Analytics & Reports</strong>
-                  <p>Generate people-counting analytics and reports.</p>
+              {/* SUCCESS MESSAGE */}
+
+              {processingStatus === "completed" && (
+
+                <div className="processing-success">
+
+                  <CheckCircle size={20} />
+
+                  <div>
+
+                    <strong>Processing Completed</strong>
+
+                    <p>
+                      Your video has been processed successfully.
+                    </p>
+
+                  </div>
+
                 </div>
-              </div>
+
+              )}
+
             </div>
 
           </div>
+
         </section>
 
-        {/* Results Section */}
+
+        {/* ================================================
+            RESULTS SECTION
+        ================================================= */}
+
         {results && (
+
           <section className="results-section">
 
-            <div className="section-heading">
+            <div className="results-section-header">
+
               <div>
-                <span className="section-eyebrow">ANALYSIS COMPLETE</span>
-                <h2>Detection Results</h2>
+
+                <h2>Processing Results</h2>
+
                 <p>
-                  Review the annotated video and people-counting analytics.
+                  Detection, tracking and analytics
+                  generated from your video.
                 </p>
+
               </div>
 
-              <span className="success-label">
+              <span className="results-success-badge">
+
+                <CheckCircle size={16} />
+
                 Completed
+
               </span>
+
             </div>
 
-            {/* Analytics Cards */}
+
+            {/* PROCESSED VIDEO */}
+
+            {results.video_url && (
+
+              <ResultsVideo
+                videoUrl={results.video_url}
+              />
+
+            )}
+
+
+            {/* ANALYTICS */}
+
             <AnalyticsCards
-              analytics={results.analytics || results.summary || results}
+              analytics={
+                results.analytics ||
+                results.summary ||
+                {}
+              }
             />
 
-            {/* Processed Video */}
-            <ResultsVideo
-              videoUrl={results.video_url || results.output_video_url}
-            />
 
-            {/* Download Reports */}
+            {/* DOWNLOADS */}
+
             <DownloadReport
-              videoUrl={results.video_url || results.output_video_url}
-              csvUrl={results.csv_url || results.csv_file_url}
-              results={results}
+              videoUrl={results.video_url}
+              csvUrl={results.csv_url}
+              jsonUrl={results.json_url}
+              analytics={
+                results.analytics ||
+                results.summary ||
+                {}
+              }
             />
 
           </section>
+
         )}
 
-        {/* Footer */}
-        <footer className="app-footer">
-          <p>
-            Powered by <strong>PragyanAI</strong>
-          </p>
 
-          <p>
-            YOLO11 | TensorFlow Lite | ByteTrack | FastAPI | React
-          </p>
+        {/* ================================================
+            WORKFLOW INFORMATION
+        ================================================= */}
 
-          <p>
-            AI Engineering & Intelligent Video Analytics
-          </p>
-        </footer>
+        <section className="workflow-section">
+
+          <div className="section-heading">
+
+            <h2>How It Works</h2>
+
+            <p>
+              AI-powered people detection and video analytics.
+            </p>
+
+          </div>
+
+
+          <div className="workflow-grid">
+
+            <div className="workflow-card">
+
+              <div className="workflow-number">
+                01
+              </div>
+
+              <Video size={26} />
+
+              <h3>Upload Video</h3>
+
+              <p>
+                Upload an MP4, AVI, MOV, MKV or WEBM video.
+              </p>
+
+            </div>
+
+
+            <div className="workflow-card">
+
+              <div className="workflow-number">
+                02
+              </div>
+
+              <div className="workflow-icon-text">
+                AI
+              </div>
+
+              <h3>Person Detection</h3>
+
+              <p>
+                YOLO11 TFLite detects people in video frames.
+              </p>
+
+            </div>
+
+
+            <div className="workflow-card">
+
+              <div className="workflow-number">
+                03
+              </div>
+
+              <Users size={26} />
+
+              <h3>Person Tracking</h3>
+
+              <p>
+                ByteTrack maintains individual tracking IDs.
+              </p>
+
+            </div>
+
+
+            <div className="workflow-card">
+
+              <div className="workflow-number">
+                04
+              </div>
+
+              <Activity size={26} />
+
+              <h3>Analytics & Reports</h3>
+
+              <p>
+                Generate annotated videos and people-counting reports.
+              </p>
+
+            </div>
+
+          </div>
+
+        </section>
 
       </main>
+
+
+      {/* ================================================
+          FOOTER
+      ================================================= */}
+
+      <footer className="app-footer">
+
+        <div className="footer-brand">
+
+          <strong>PragyanAI</strong>
+
+          <span>
+            AI-Powered People Detection & Counting
+          </span>
+
+        </div>
+
+        <div className="footer-engine">
+
+          YOLO11 TFLite | ByteTrack | OpenCV
+
+        </div>
+
+        <div className="footer-copyright">
+
+          © {new Date().getFullYear()} PragyanAI.
+          All rights reserved.
+
+        </div>
+
+      </footer>
+
     </div>
+
   );
 }
 
+
 export default App;
+
