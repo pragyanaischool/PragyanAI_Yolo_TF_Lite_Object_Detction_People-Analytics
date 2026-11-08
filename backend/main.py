@@ -23,12 +23,15 @@ import json
 import uuid
 import logging
 import time
+import threading
+from copy import deepcopy
 from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import (
     FastAPI,
     UploadFile,
+    BackgroundTasks,
     File,
     Form,
     HTTPException,
@@ -133,6 +136,10 @@ CHUNK_SIZE = 1024 * 1024
 processor = None
 model_loaded = False
 model_error = None
+
+# In-memory job registry. Jobs survive browser disconnects, but not Render restarts.
+jobs = {}
+jobs_lock = threading.Lock()
 
 
 # =========================================================
@@ -474,10 +481,318 @@ async def api_root():
             "/",
             "/health",
             "/api/model-info",
+            "/api/jobs",
+            "/api/jobs/{job_id}",
             "/api/process",
             "/api/outputs",
         ],
     }
+
+
+
+# =========================================================
+# ASYNCHRONOUS VIDEO JOB HELPERS
+# =========================================================
+
+def update_job(job_id, **changes):
+    """Thread-safe update of a job record."""
+    with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id].update(changes)
+            jobs[job_id]["updated_at"] = time.time()
+
+
+def get_job_snapshot(job_id):
+    """Return a copy of a job record."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        return deepcopy(job) if job else None
+
+
+async def process_job_background(
+    job_id,
+    input_path,
+    output_path,
+    csv_path,
+    json_path,
+    confidence,
+    frame_interval,
+    video_info,
+    current_processor,
+):
+    """
+    Run the long video-processing operation after the upload request
+    has returned. The browser can poll the job endpoint independently.
+    """
+    started = time.perf_counter()
+    update_job(
+        job_id,
+        status="processing",
+        progress=10,
+        message="Video accepted. YOLO11 processing has started.",
+    )
+
+    logger.info("[ASYNC JOB START] job_id=%s", job_id)
+
+    try:
+        def publish_progress(percent, current_frame, total_frames, eta_seconds):
+            overall_progress = 10 + (float(percent) * 0.85)
+            update_job(
+                job_id,
+                progress=min(95, round(overall_progress, 1)),
+                current_frame=int(current_frame),
+                total_frames=int(total_frames),
+                eta_seconds=round(float(eta_seconds), 1),
+                message=f"Processing frame {current_frame} of {total_frames}.",
+            )
+
+        analytics_result = await run_in_threadpool(
+            current_processor.process,
+            str(input_path),
+            str(output_path),
+            confidence,
+            frame_interval,
+            str(csv_path),
+            publish_progress,
+        )
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError("Video processor did not generate a valid output video.")
+
+        if not isinstance(analytics_result, dict):
+            analytics_result = {"result": analytics_result}
+
+        analytics_result["job_id"] = job_id
+        analytics_result["video_info"] = video_info
+        analytics_result["processing_settings"] = {
+            "confidence": confidence,
+            "frame_interval": frame_interval,
+            "model": "YOLO11 TFLite",
+            "tracker": "ByteTrack",
+        }
+
+        with open(json_path, "w", encoding="utf-8") as json_file:
+            json.dump(analytics_result, json_file, indent=4, default=str)
+
+        result = {
+            "success": True,
+            "message": "People detection and tracking completed successfully.",
+            "job_id": job_id,
+            "video_url": get_public_url(output_path),
+            "csv_url": get_public_url(csv_path) if csv_path.exists() else None,
+            "json_url": get_public_url(json_path),
+            "analytics": analytics_result,
+            "summary": analytics_result,
+            "video_info": video_info,
+            "processing_settings": {
+                "confidence": confidence,
+                "frame_interval": frame_interval,
+                "detection_engine": "YOLO11 TFLite",
+                "tracking_engine": "ByteTrack",
+            },
+        }
+
+        update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Video processing completed successfully.",
+            completed_at=time.time(),
+            processing_seconds=round(time.perf_counter() - started, 2),
+            result=result,
+            error=None,
+        )
+
+        logger.info(
+            "[ASYNC JOB COMPLETE] job_id=%s elapsed=%.2fs output_size=%.2fMB",
+            job_id,
+            time.perf_counter() - started,
+            output_path.stat().st_size / (1024 * 1024),
+        )
+
+    except Exception as exc:
+        logger.exception("[ASYNC JOB FAILED] job_id=%s error=%s", job_id, exc)
+        update_job(
+            job_id,
+            status="failed",
+            progress=0,
+            message="Video processing failed.",
+            error=str(exc),
+            failed_at=time.time(),
+        )
+
+    finally:
+        cleanup_file(input_path)
+
+
+# =========================================================
+# ASYNCHRONOUS VIDEO JOB API
+# =========================================================
+
+@app.post("/api/jobs", status_code=202)
+async def create_video_job(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    confidence: float = Form(0.35),
+    frame_interval: int = Form(1),
+):
+    """
+    Upload and validate a video, create a job, and return immediately.
+    Processing continues independently of the browser request.
+    """
+    request_started = time.perf_counter()
+    input_path = None
+
+    try:
+        current_processor = get_current_processor()
+
+        if not 0.0 <= confidence <= 1.0:
+            raise HTTPException(status_code=400, detail="Confidence must be between 0 and 1.")
+
+        if frame_interval < 1:
+            raise HTTPException(status_code=400, detail="Frame interval must be at least 1.")
+
+        original_filename = file.filename or "uploaded_video.mp4"
+        extension = Path(original_filename).suffix.lower()
+
+        if extension not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported video format. Supported formats: MP4, AVI, MOV, MKV, WEBM.",
+            )
+
+        job_id = uuid.uuid4().hex
+        input_path = UPLOAD_DIR / safe_filename(original_filename)
+        output_path = OUTPUT_DIR / f"{job_id}_processed.mp4"
+        csv_path = OUTPUT_DIR / f"{job_id}_analytics.csv"
+        json_path = OUTPUT_DIR / f"{job_id}_analytics.json"
+
+        uploaded_size = 0
+        with open(input_path, "wb") as destination:
+            while True:
+                chunk = await file.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                uploaded_size += len(chunk)
+                if uploaded_size > MAX_UPLOAD_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Video exceeds the maximum upload size of 500 MB.",
+                    )
+                destination.write(chunk)
+
+        if uploaded_size == 0:
+            raise HTTPException(status_code=400, detail="Uploaded video is empty.")
+
+        try:
+            video_info = await run_in_threadpool(validate_video, str(input_path))
+        except VideoValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        now = time.time()
+        with jobs_lock:
+            jobs[job_id] = {
+                "job_id": job_id,
+                "status": "queued",
+                "progress": 5,
+                "message": "Video uploaded and validated. Waiting for processing.",
+                "filename": Path(original_filename).name,
+                "file_size_bytes": uploaded_size,
+                "video_info": video_info,
+                "confidence": confidence,
+                "frame_interval": frame_interval,
+                "created_at": now,
+                "updated_at": now,
+                "result": None,
+                "error": None,
+            }
+
+        background_tasks.add_task(
+            process_job_background,
+            job_id,
+            input_path,
+            output_path,
+            csv_path,
+            json_path,
+            confidence,
+            frame_interval,
+            video_info,
+            current_processor,
+        )
+
+        logger.info(
+            "[ASYNC JOB CREATED] job_id=%s filename=%s size=%.2fMB upload_and_validation=%.2fs",
+            job_id,
+            original_filename,
+            uploaded_size / (1024 * 1024),
+            time.perf_counter() - request_started,
+        )
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "status": "queued",
+            "progress": 5,
+            "message": "Video uploaded successfully. Processing has been queued.",
+            "status_url": f"/api/jobs/{job_id}",
+        }
+
+    except HTTPException:
+        cleanup_file(input_path)
+        raise
+    except Exception as exc:
+        cleanup_file(input_path)
+        logger.exception("[ASYNC JOB CREATE FAILED] error=%s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail={"message": "Unable to create video-processing job.", "error": str(exc)},
+        )
+    finally:
+        await file.close()
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_video_job_status(job_id: str):
+    """Return job status, progress, and completed result when available."""
+    job = get_job_snapshot(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    response = {
+        "success": True,
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "message": job["message"],
+        "filename": job.get("filename"),
+        "video_info": job.get("video_info"),
+        "current_frame": job.get("current_frame"),
+        "total_frames": job.get("total_frames"),
+        "eta_seconds": job.get("eta_seconds"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "processing_seconds": job.get("processing_seconds"),
+        "error": job.get("error"),
+    }
+
+    if job["status"] == "completed":
+        response["result"] = job.get("result")
+
+    return response
+
+
+@app.get("/api/jobs/{job_id}/analytics")
+async def get_video_job_analytics(job_id: str):
+    """Return analytics for a completed job."""
+    job = get_job_snapshot(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["status"] != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job is {job['status']}; analytics are not ready.",
+        )
+    return job["result"]["analytics"]
 
 
 # =========================================================
