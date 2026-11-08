@@ -1,261 +1,257 @@
 
 /*
 ========================================================
- PragyanAI - People Detection & Counting
- API Service
-========================================================
+ P
+/*
+===========================================================
+PragyanAI - People Detection & Counting
+File: frontend/src/services/api.js
+===========================================================
 
-Frontend : React + Vite + Netlify
-Backend  : FastAPI + Render
-Model    : YOLO11 TFLite
-Tracking : ByteTrack
-========================================================
+Backend:
+    FastAPI on Render
+
+Detection:
+    YOLO11 TFLite
+
+Tracking:
+    ByteTrack
+
+Video Processing:
+    OpenCV
+
+Features:
+    1. Backend health check
+    2. Model readiness check
+    3. Video upload
+    4. Video processing
+    5. Processing results
+    6. Output URL handling
+    7. MP4, CSV and JSON downloads
+===========================================================
 */
 
-// ======================================================
+
+// =========================================================
 // 1. API CONFIGURATION
-// ======================================================
+// =========================================================
+
+const DEFAULT_API_URL =
+  "https://pragyanai-yolo-tf-lite-object-detction.onrender.com";
 
 const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL ||
-  "https://pragyanai-yolo-tf-lite-object-detction.onrender.com"
-).replace(/\/+$/, "");
+  import.meta.env.VITE_API_BASE_URL || DEFAULT_API_URL
+).trim().replace(/\/+$/, "");
 
-const API_BASE_PATH = "/api";
+const API_URL = `${API_BASE_URL}/api`;
 
-const MAX_FILE_SIZE = 500 * 1024 * 1024;
-
-const ALLOWED_EXTENSIONS = [
-  "mp4",
-  "avi",
-  "mov",
-  "mkv",
-  "webm",
-];
-
-const REQUEST_TIMEOUT = 10 * 60 * 1000;
-
-
-// ======================================================
-// 2. API URL HELPER
-// ======================================================
-
-export const getApiUrl = (endpoint) => {
-  const cleanEndpoint = endpoint.startsWith("/")
-    ? endpoint
-    : `/${endpoint}`;
-
-  return `${API_BASE_URL}${cleanEndpoint}`;
+export const API_CONFIG = {
+  BASE_URL: API_BASE_URL,
+  API_URL,
+  HEALTH_URL: `${API_BASE_URL}/health`,
+  ROOT_URL: API_BASE_URL,
+  MODEL_INFO_URL: `${API_URL}/model-info`,
+  PROCESS_URL: `${API_URL}/process`,
+  OUTPUTS_URL: `${API_URL}/outputs`,
+  MAX_UPLOAD_SIZE: 500 * 1024 * 1024,
+  ALLOWED_EXTENSIONS: [
+    "mp4",
+    "avi",
+    "mov",
+    "mkv",
+    "webm",
+  ],
 };
 
-
-// ======================================================
-// 3. OUTPUT FILE URL HELPER
-// ======================================================
-
-export const getFileUrl = (url) => {
-  if (!url) return "";
-
-  if (
-    url.startsWith("http://") ||
-    url.startsWith("https://") ||
-    url.startsWith("blob:")
-  ) {
-    return url;
-  }
-
-  return `${API_BASE_URL}${
-    url.startsWith("/") ? url : `/${url}`
-  }`;
-};
+console.info(
+  "PragyanAI Backend URL:",
+  API_BASE_URL
+);
 
 
-// ======================================================
-// 4. ERROR MESSAGE HELPER
-// ======================================================
-
-const extractErrorMessage = (data, fallback) => {
-  if (!data) return fallback;
-
-  if (typeof data.detail === "string") {
-    return data.detail;
-  }
-
-  if (Array.isArray(data.detail)) {
-    return data.detail
-      .map((item) => item.msg || JSON.stringify(item))
-      .join(", ");
-  }
-
-  if (typeof data.message === "string") {
-    return data.message;
-  }
-
-  return fallback;
-};
-
-
-// ======================================================
-// 5. RESPONSE PARSER
-// ======================================================
+// =========================================================
+// 2. COMMON API ERROR HANDLER
+// =========================================================
 
 const parseResponse = async (response) => {
   const contentType =
     response.headers.get("content-type") || "";
 
+  let data;
+
   if (contentType.includes("application/json")) {
-    return await response.json();
+    data = await response.json();
+  } else {
+    data = await response.text();
   }
 
-  const text = await response.text();
+  if (!response.ok) {
+    let message;
 
-  return {
-    message: text || response.statusText,
-  };
+    if (typeof data === "string") {
+      message = data;
+    } else if (typeof data?.detail === "string") {
+      message = data.detail;
+    } else if (data?.detail?.message) {
+      message = data.detail.message;
+    } else if (data?.message) {
+      message = data.message;
+    } else {
+      message = `Request failed with HTTP ${response.status}`;
+    }
+
+    throw new Error(message);
+  }
+
+  return data;
 };
 
 
-// ======================================================
-// 6. GENERIC API REQUEST
-// ======================================================
+// =========================================================
+// 3. BACKEND HEALTH CHECK
+// =========================================================
 
-const apiRequest = async (
-  endpoint,
-  options = {},
-  timeout = 30000
-) => {
-  const controller = new AbortController();
-
-  const timeoutId = setTimeout(
-    () => controller.abort(),
-    timeout
-  );
-
+export const healthCheck = async () => {
   try {
     const response = await fetch(
-      getApiUrl(endpoint),
+      API_CONFIG.HEALTH_URL,
       {
-        ...options,
-        signal: controller.signal,
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+        cache: "no-store",
       }
     );
 
     const data = await parseResponse(response);
 
-    if (!response.ok) {
-      throw new Error(
-        extractErrorMessage(
-          data,
-          `Server error: ${response.status}`
-        )
-      );
-    }
+    const connected =
+      data.api === "running" ||
+      data.backend_connected === true ||
+      data.status === "healthy" ||
+      data.status === "degraded";
 
-    return data;
+    const modelLoaded =
+      data.model_loaded === true;
+
+    return {
+      connected,
+      model_loaded: modelLoaded,
+      model_status: modelLoaded
+        ? "ready"
+        : connected
+          ? "not_ready"
+          : "unknown",
+
+      status: data.status || "unknown",
+
+      api: data.api || null,
+
+      model_exists: data.model_exists ?? null,
+
+      model_path: data.model_path || null,
+
+      model_error: data.model_error || null,
+
+      detection_engine:
+        data.detection_engine || "YOLO11",
+
+      tracking_engine:
+        data.tracking_engine || "ByteTrack",
+
+      inference_runtime:
+        data.inference_runtime || "TensorFlow Lite",
+
+      message: modelLoaded
+        ? "Backend connected. YOLO11 model is ready."
+        : connected
+          ? "Backend connected, but model is not ready."
+          : "Backend connection could not be verified.",
+
+      raw: data,
+    };
 
   } catch (error) {
-
-    if (error.name === "AbortError") {
-      throw new Error(
-        "Backend request timed out. Please retry."
-      );
-    }
-
-    if (
-      error instanceof TypeError ||
-      error.message === "Failed to fetch"
-    ) {
-      throw new Error(
-        "Cannot connect to Render backend. Check backend availability, API URL and CORS configuration."
-      );
-    }
-
-    throw error;
-
-  } finally {
-    clearTimeout(timeoutId);
-  }
-};
-
-
-// ======================================================
-// 7. BACKEND HEALTH CHECK
-// ======================================================
-
-export const healthCheck = async () => {
-  try {
-    const data = await apiRequest(
-      "/health",
-      { method: "GET" },
-      30000
+    console.error(
+      "PragyanAI backend health check failed:",
+      error
     );
 
     return {
-      success: true,
-      connected: true,
-      modelLoaded: data.model_loaded === true,
-      data,
-    };
-
-  } catch (error) {
-
-    return {
-      success: false,
       connected: false,
-      modelLoaded: false,
-      error: error.message,
+      model_loaded: false,
+      model_status: "unknown",
+      status: "disconnected",
+      api: null,
+      model_exists: null,
+      model_path: null,
+      model_error: error.message,
+      detection_engine: "YOLO11",
+      tracking_engine: "ByteTrack",
+      inference_runtime: "TensorFlow Lite",
+      message: error.message,
+      raw: null,
     };
   }
 };
 
 
-// ======================================================
-// 8. BACKEND ROOT STATUS
-// ======================================================
+// =========================================================
+// 4. BACKEND STATUS
+// =========================================================
 
 export const getBackendStatus = async () => {
-  return apiRequest(
-    "/",
-    { method: "GET" },
-    30000
-  );
+  return await healthCheck();
 };
 
 
-// ======================================================
-// 9. MODEL INFORMATION
-// ======================================================
+// =========================================================
+// 5. GET MODEL INFORMATION
+// =========================================================
 
 export const getModelInfo = async () => {
-  return apiRequest(
-    `${API_BASE_PATH}/model-info`,
-    { method: "GET" },
-    30000
-  );
+  try {
+    const response = await fetch(
+      API_CONFIG.MODEL_INFO_URL,
+      {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+        cache: "no-store",
+      }
+    );
+
+    return await parseResponse(response);
+
+  } catch (error) {
+    console.error(
+      "Model information error:",
+      error
+    );
+
+    throw error;
+  }
 };
 
 
-// ======================================================
-// 10. VALIDATE VIDEO FILE
-// ======================================================
+// =========================================================
+// 6. VIDEO FILE VALIDATION
+// =========================================================
 
 export const validateVideoFile = (file) => {
 
   if (!file) {
-    throw new Error("Please select a video file.");
-  }
-
-  if (
-    typeof file.name !== "string" ||
-    typeof file.size !== "number"
-  ) {
     throw new Error(
-      "Invalid video file object. Please select the video again."
+      "Please select a video file."
     );
   }
 
-  if (file.size <= 0) {
-    throw new Error("The selected video file is empty.");
+  if (!(file instanceof File)) {
+    throw new Error(
+      "Invalid video file."
+    );
   }
 
   const extension = file.name
@@ -263,25 +259,43 @@ export const validateVideoFile = (file) => {
     .pop()
     .toLowerCase();
 
-  if (!ALLOWED_EXTENSIONS.includes(extension)) {
+  if (
+    !API_CONFIG.ALLOWED_EXTENSIONS.includes(extension)
+  ) {
     throw new Error(
-      "Unsupported video format. Supported formats: MP4, AVI, MOV, MKV and WEBM."
+      "Unsupported video format. Please upload MP4, AVI, MOV, MKV or WEBM."
     );
   }
 
-  if (file.size > MAX_FILE_SIZE) {
+  if (file.size === 0) {
     throw new Error(
-      "Video exceeds the maximum upload size of 500 MB."
+      "The selected video file is empty."
     );
   }
 
-  return true;
+  if (
+    file.size > API_CONFIG.MAX_UPLOAD_SIZE
+  ) {
+    throw new Error(
+      "Video size exceeds the maximum limit of 500 MB."
+    );
+  }
+
+  return {
+    valid: true,
+    filename: file.name,
+    size: file.size,
+    size_mb: Number(
+      (file.size / (1024 * 1024)).toFixed(2)
+    ),
+    extension,
+  };
 };
 
 
-// ======================================================
-// 11. PROCESS VIDEO
-// ======================================================
+// =========================================================
+// 7. PROCESS VIDEO
+// =========================================================
 
 export const processVideo = async (
   file,
@@ -290,210 +304,172 @@ export const processVideo = async (
   onProgress = null
 ) => {
 
-  // Validate actual browser File object
-  validateVideoFile(file);
-
-  if (
-    !Number.isFinite(Number(confidence)) ||
-    Number(confidence) < 0 ||
-    Number(confidence) > 1
-  ) {
-    throw new Error(
-      "Confidence must be between 0 and 1."
-    );
-  }
-
-  if (
-    !Number.isInteger(Number(frameInterval)) ||
-    Number(frameInterval) < 1
-  ) {
-    throw new Error(
-      "Frame interval must be a positive integer."
-    );
-  }
-
-  // Prepare multipart upload
-  const formData = new FormData();
-
-  formData.append("file", file, file.name);
-
-  formData.append(
-    "confidence",
-    String(confidence)
-  );
-
-  formData.append(
-    "frame_interval",
-    String(frameInterval)
-  );
-
-  const controller = new AbortController();
-
-  const timeoutId = setTimeout(
-    () => controller.abort(),
-    REQUEST_TIMEOUT
-  );
-
   try {
 
-    console.info("PragyanAI video upload started");
+    // Validate video
+    validateVideoFile(file);
 
-    console.info("Backend URL:", API_BASE_URL);
+    // Validate confidence
+    if (
+      !Number.isFinite(Number(confidence)) ||
+      Number(confidence) < 0 ||
+      Number(confidence) > 1
+    ) {
+      throw new Error(
+        "Confidence must be between 0 and 1."
+      );
+    }
 
-    console.info("Video filename:", file.name);
+    // Validate frame interval
+    if (
+      !Number.isInteger(Number(frameInterval)) ||
+      Number(frameInterval) < 1
+    ) {
+      throw new Error(
+        "Frame interval must be a positive integer."
+      );
+    }
 
-    console.info("Video size:", file.size);
+    // Prepare multipart request
+    const formData = new FormData();
 
-    console.info("Video type:", file.type);
+    formData.append("file", file);
 
-    // IMPORTANT:
-    // Do not manually set Content-Type.
-    // Browser automatically adds multipart boundary.
+    formData.append(
+      "confidence",
+      String(confidence)
+    );
 
+    formData.append(
+      "frame_interval",
+      String(frameInterval)
+    );
+
+    console.info(
+      "Uploading video to PragyanAI backend:",
+      file.name
+    );
+
+    if (onProgress) {
+      // This is a processing-state indicator,
+      // not actual upload progress.
+      onProgress(10);
+    }
+
+    // Send request
     const response = await fetch(
-      getApiUrl(`${API_BASE_PATH}/process`),
+      API_CONFIG.PROCESS_URL,
       {
         method: "POST",
         body: formData,
-        signal: controller.signal,
       }
     );
 
-    const data = await parseResponse(response);
+    const result = await parseResponse(response);
 
-    if (!response.ok) {
-
+    if (!result.success) {
       throw new Error(
-        extractErrorMessage(
-          data,
-          `Video processing failed: HTTP ${response.status}`
-        )
+        result.message ||
+        "Video processing was unsuccessful."
       );
     }
 
-    if (data.success === false) {
-      throw new Error(
-        data.message || "Video processing failed."
-      );
-    }
+    console.info(
+      "Video processing completed:",
+      result
+    );
 
-    const videoUrl =
-      data.video_url ||
-      data.output_video_url ||
-      data.processed_video_url ||
-      null;
-
-    const csvUrl =
-      data.csv_url ||
-      data.csv_file_url ||
-      null;
-
-    const jsonUrl =
-      data.json_url ||
-      data.json_file_url ||
-      null;
-
-    if (!videoUrl) {
-      throw new Error(
-        "Backend did not return a processed video URL."
-      );
-    }
-
-    if (typeof onProgress === "function") {
+    if (onProgress) {
       onProgress(100);
     }
 
-    console.info("Video processing completed", data);
-
+    // Normalize output URLs
     return {
-      ...data,
+      ...result,
 
-      success: true,
+      video_url: getFileUrl(
+        result.video_url
+      ),
 
-      video_url: getFileUrl(videoUrl),
+      csv_url: getFileUrl(
+        result.csv_url
+      ),
 
-      output_video_url: getFileUrl(videoUrl),
-
-      csv_url: csvUrl
-        ? getFileUrl(csvUrl)
-        : null,
-
-      csv_file_url: csvUrl
-        ? getFileUrl(csvUrl)
-        : null,
-
-      json_url: jsonUrl
-        ? getFileUrl(jsonUrl)
-        : null,
+      json_url: getFileUrl(
+        result.json_url
+      ),
 
       analytics:
-        data.analytics ||
-        data.summary ||
+        result.analytics ||
+        result.summary ||
         {},
 
       summary:
-        data.summary ||
-        data.analytics ||
+        result.summary ||
+        result.analytics ||
         {},
     };
 
   } catch (error) {
 
     console.error(
-      "PragyanAI processing error:",
+      "Video processing error:",
       error
     );
 
-    if (error.name === "AbortError") {
-
-      throw new Error(
-        "Processing request timed out. The Render service may have stopped or the video may take longer to process."
-      );
-    }
-
-    if (
-      error instanceof TypeError ||
-      error.message === "Failed to fetch"
-    ) {
-
-      throw new Error(
-        "Cannot connect to the backend. Check Render status, API URL and CORS configuration."
-      );
-    }
-
     throw error;
-
-  } finally {
-
-    clearTimeout(timeoutId);
-
   }
 };
 
 
-// ======================================================
-// 12. OPTIONAL PROCESSING RESULTS
-// ======================================================
-
-// Requires a corresponding backend route.
-// Do not call until that route is implemented.
+// =========================================================
+// 8. PROCESSING RESULTS
+// =========================================================
 
 export const getProcessingResults = async (jobId) => {
 
   if (!jobId) {
-    throw new Error("Processing job ID is required.");
+    throw new Error(
+      "Job ID is required."
+    );
   }
 
-  return apiRequest(
-    `${API_BASE_PATH}/results/${encodeURIComponent(jobId)}`,
-    { method: "GET" }
+  // The current backend does not expose a
+  // job-specific results endpoint.
+  // Results are returned directly by /api/process.
+
+  throw new Error(
+    "Job-specific results retrieval is not implemented in the current backend."
   );
 };
 
 
-// ======================================================
-// 13. DOWNLOAD FILE
-// ======================================================
+// =========================================================
+// 9. OUTPUT FILE URL
+// =========================================================
+
+export const getFileUrl = (url) => {
+
+  if (!url) {
+    return null;
+  }
+
+  if (
+    url.startsWith("http://") ||
+    url.startsWith("https://")
+  ) {
+    return url;
+  }
+
+  return `${API_BASE_URL}${
+    url.startsWith("/") ? "" : "/"
+  }${url}`;
+};
+
+
+// =========================================================
+// 10. DOWNLOAD FILE
+// =========================================================
 
 export const downloadFile = async (
   fileUrl,
@@ -501,16 +477,18 @@ export const downloadFile = async (
 ) => {
 
   if (!fileUrl) {
-    throw new Error("Download URL is unavailable.");
+    throw new Error(
+      "Download URL is not available."
+    );
   }
 
-  const response = await fetch(
-    getFileUrl(fileUrl)
-  );
+  const url = getFileUrl(fileUrl);
+
+  const response = await fetch(url);
 
   if (!response.ok) {
     throw new Error(
-      `Download failed: HTTP ${response.status}`
+      `Download failed with HTTP ${response.status}`
     );
   }
 
@@ -518,61 +496,160 @@ export const downloadFile = async (
 
   const objectUrl = URL.createObjectURL(blob);
 
-  const link = document.createElement("a");
+  try {
 
-  link.href = objectUrl;
-  link.download = filename;
+    const link = document.createElement("a");
 
-  document.body.appendChild(link);
+    link.href = objectUrl;
+    link.download = filename;
 
-  link.click();
+    document.body.appendChild(link);
 
-  link.remove();
+    link.click();
 
-  URL.revokeObjectURL(objectUrl);
+    link.remove();
 
-  return true;
+  } finally {
+
+    // Allow the browser to start reading the blob.
+    setTimeout(() => {
+      URL.revokeObjectURL(objectUrl);
+    }, 1000);
+
+  }
 };
 
 
-// ======================================================
-// 14. API CONFIGURATION
-// ======================================================
+// =========================================================
+// 11. DOWNLOAD PROCESSED VIDEO
+// =========================================================
 
-export const API_CONFIG = {
-  BASE_URL: API_BASE_URL,
-  API_PATH: API_BASE_PATH,
+export const downloadProcessedVideo = async (
+  videoUrl
+) => {
 
-  HEALTH_URL: getApiUrl("/health"),
-
-  PROCESS_URL: getApiUrl(
-    `${API_BASE_PATH}/process`
-  ),
-
-  MODEL_INFO_URL: getApiUrl(
-    `${API_BASE_PATH}/model-info`
-  ),
-
-  MAX_FILE_SIZE,
-  ALLOWED_EXTENSIONS,
+  return downloadFile(
+    videoUrl,
+    "pragyanai_people_detection.mp4"
+  );
 };
 
 
-// ======================================================
-// 15. DEFAULT EXPORT
-// ======================================================
+// =========================================================
+// 12. DOWNLOAD CSV REPORT
+// =========================================================
+
+export const downloadCSVReport = async (
+  csvUrl
+) => {
+
+  return downloadFile(
+    csvUrl,
+    "pragyanai_people_analytics.csv"
+  );
+};
+
+
+// =========================================================
+// 13. DOWNLOAD JSON REPORT
+// =========================================================
+
+export const downloadJSONReport = async (
+  jsonUrl
+) => {
+
+  return downloadFile(
+    jsonUrl,
+    "pragyanai_people_analytics.json"
+  );
+};
+
+
+// =========================================================
+// 14. GET OUTPUT FILES
+// =========================================================
+
+export const getOutputFiles = async () => {
+
+  const response = await fetch(
+    API_CONFIG.OUTPUTS_URL,
+    {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+    }
+  );
+
+  return parseResponse(response);
+};
+
+
+// =========================================================
+// 15. DELETE OUTPUT FILE
+// =========================================================
+
+export const deleteOutputFile = async (
+  filename
+) => {
+
+  if (!filename) {
+    throw new Error(
+      "Filename is required."
+    );
+  }
+
+  const response = await fetch(
+    `${API_CONFIG.OUTPUTS_URL}/${encodeURIComponent(filename)}`,
+    {
+      method: "DELETE",
+    }
+  );
+
+  return parseResponse(response);
+};
+
+
+// =========================================================
+// 16. BACKEND CONNECTION TEST
+// =========================================================
+
+export const testBackendConnection = async () => {
+
+  const result = await healthCheck();
+
+  return {
+    success: result.connected,
+    connected: result.connected,
+    model_loaded: result.model_loaded,
+    model_status: result.model_status,
+    message: result.message,
+    details: result,
+  };
+};
+
+
+// =========================================================
+// 17. DEFAULT EXPORT
+// =========================================================
 
 const api = {
+  API_CONFIG,
   healthCheck,
   getBackendStatus,
   getModelInfo,
   validateVideoFile,
   processVideo,
   getProcessingResults,
-  downloadFile,
   getFileUrl,
-  getApiUrl,
-  API_CONFIG,
+  downloadFile,
+  downloadProcessedVideo,
+  downloadCSVReport,
+  downloadJSONReport,
+  getOutputFiles,
+  deleteOutputFile,
+  testBackendConnection,
 };
 
 export default api;
+
