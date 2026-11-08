@@ -777,6 +777,7 @@ class VideoProcessor:
         confidence=0.35,
         frame_interval=1,
         csv_path=None,
+        progress_callback=None,
     ):
         """
         Complete video processing pipeline.
@@ -787,6 +788,7 @@ class VideoProcessor:
             confidence: YOLO confidence threshold.
             frame_interval: Run inference every N frames.
             csv_path: CSV analytics destination.
+            progress_callback: Optional callback(progress, current_frame, total_frames, eta_seconds).
 
         Returns:
             Analytics dictionary.
@@ -836,6 +838,7 @@ class VideoProcessor:
                 float(confidence),
                 int(frame_interval),
                 csv_path,
+                progress_callback,
             )
 
     # ========================================================
@@ -849,6 +852,7 @@ class VideoProcessor:
         confidence,
         frame_interval,
         csv_path,
+        progress_callback=None,
     ):
 
         start_time = time.perf_counter()
@@ -1176,6 +1180,19 @@ class VideoProcessor:
                         frame_read_seconds,
                         output_write_seconds,
                     )
+
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(
+                                progress,
+                                frame_number,
+                                total_frames,
+                                eta_seconds,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "[PROGRESS CALLBACK ERROR] Unable to publish job progress"
+                            )
 
                     last_progress_time = now
                     last_progress_frame = frame_number
