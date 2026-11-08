@@ -1,27 +1,15 @@
 
-import React, { useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
+
 import {
-  Upload,
   Video,
   FileVideo,
-  X,
-  CheckCircle,
+  Trash2,
+  Clock,
+  HardDrive,
+  FileType,
   AlertCircle
 } from "lucide-react";
-
-// --------------------------------------------------
-// Configuration
-// --------------------------------------------------
-
-const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
-
-const SUPPORTED_EXTENSIONS = [
-  "mp4",
-  "avi",
-  "mov",
-  "mkv",
-  "webm"
-];
 
 // --------------------------------------------------
 // Helper: Format File Size
@@ -44,268 +32,275 @@ function formatFileSize(bytes) {
 }
 
 // --------------------------------------------------
-// Helper: Validate Video
+// Helper: Format Duration
 // --------------------------------------------------
 
-function validateVideo(file) {
-  if (!file) {
-    return "Please select a video file.";
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds)) {
+    return "Calculating...";
   }
 
-  const extension = file.name
-    .split(".")
-    .pop()
-    .toLowerCase();
+  const totalSeconds = Math.floor(seconds);
 
-  if (!SUPPORTED_EXTENSIONS.includes(extension)) {
-    return "Unsupported video format. Please upload MP4, AVI, MOV, MKV or WebM.";
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return [
+      hours,
+      String(minutes).padStart(2, "0"),
+      String(remainingSeconds).padStart(2, "0")
+    ].join(":");
   }
 
-  if (file.size === 0) {
-    return "The selected video file is empty.";
-  }
-
-  if (file.size > MAX_FILE_SIZE) {
-    return "File size exceeds the maximum allowed limit of 500 MB.";
-  }
-
-  return null;
+  return [
+    String(minutes).padStart(2, "0"),
+    String(remainingSeconds).padStart(2, "0")
+  ].join(":");
 }
 
 // --------------------------------------------------
-// Main Video Upload Component
+// Video Preview Component
 // --------------------------------------------------
 
-function VideoUpload({
-  selectedFile,
-  onFileSelect,
+function VideoPreview({
+  file,
+  onRemove,
   disabled = false
 }) {
-  const fileInputRef = useRef(null);
-
-  const [isDragging, setIsDragging] = useState(false);
-  const [error, setError] = useState("");
-
-  // ------------------------------------------------
-  // Handle File Selection
-  // ------------------------------------------------
-
-  const handleFile = (file) => {
-    if (disabled) return;
-
-    setError("");
-
-    const validationError = validateVideo(file);
-
-    if (validationError) {
-      setError(validationError);
-      return;
-    }
-
-    onFileSelect(file);
-  };
+  const [videoUrl, setVideoUrl] = useState("");
+  const [duration, setDuration] = useState(null);
+  const [videoError, setVideoError] = useState("");
 
   // ------------------------------------------------
-  // Browse Files
+  // Create and release temporary video URL
   // ------------------------------------------------
 
-  const handleBrowse = () => {
-    if (disabled) return;
-
-    fileInputRef.current?.click();
-  };
-
-  // ------------------------------------------------
-  // Input Change
-  // ------------------------------------------------
-
-  const handleInputChange = (event) => {
-    const file = event.target.files?.[0];
-
-    if (file) {
-      handleFile(file);
-    }
-
-    // Allow selecting the same file again
-    event.target.value = "";
-  };
-
-  // ------------------------------------------------
-  // Drag Events
-  // ------------------------------------------------
-
-  const handleDragOver = (event) => {
-    event.preventDefault();
-
-    if (!disabled) {
-      setIsDragging(true);
-    }
-  };
-
-  const handleDragLeave = (event) => {
-    event.preventDefault();
-
-    if (!event.currentTarget.contains(event.relatedTarget)) {
-      setIsDragging(false);
-    }
-  };
-
-  const handleDrop = (event) => {
-    event.preventDefault();
-
-    setIsDragging(false);
-
-    if (disabled) return;
-
-    const file = event.dataTransfer.files?.[0];
-
+  useEffect(() => {
     if (!file) {
-      setError("No file was selected.");
+      setVideoUrl("");
+      setDuration(null);
       return;
     }
 
-    handleFile(file);
+    const url = URL.createObjectURL(file);
+
+    setVideoUrl(url);
+    setDuration(null);
+    setVideoError("");
+
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [file]);
+
+  // ------------------------------------------------
+  // Extract Video Metadata
+  // ------------------------------------------------
+
+  const handleMetadataLoaded = (event) => {
+    const video = event.currentTarget;
+
+    if (Number.isFinite(video.duration)) {
+      setDuration(video.duration);
+    } else {
+      setDuration(0);
+    }
+
+    setVideoError("");
   };
 
   // ------------------------------------------------
-  // Remove Selected File
+  // Handle Video Loading Error
+  // ------------------------------------------------
+
+  const handleVideoError = () => {
+    setVideoError(
+      "Unable to preview this video in your browser. The backend may still support processing this format."
+    );
+  };
+
+  // ------------------------------------------------
+  // Remove Video
   // ------------------------------------------------
 
   const handleRemove = () => {
     if (disabled) return;
 
-    onFileSelect(null);
-    setError("");
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
+    if (onRemove) {
+      onRemove();
     }
   };
+
+  // ------------------------------------------------
+  // File Information
+  // ------------------------------------------------
+
+  const fileExtension = file?.name
+    ?.split(".")
+    .pop()
+    ?.toUpperCase() || "VIDEO";
+
+  if (!file) {
+    return null;
+  }
 
   // ------------------------------------------------
   // Render
   // ------------------------------------------------
 
   return (
-    <section
-      className={`upload-card ${isDragging ? "drag-active" : ""}`}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-    >
+    <section className="preview-card">
 
-      <div className="upload-content">
+      {/* Preview Header */}
+      <div className="preview-header">
 
-        {/* Upload Icon */}
-        <div className="upload-icon">
-          <Upload size={30} strokeWidth={1.8} />
+        <div>
+          <h2>Video Preview</h2>
+
+          <p className="card-description">
+            Review your uploaded video before processing.
+          </p>
         </div>
 
-        <h2>Upload Your Video</h2>
-
-        <p>
-          Drag and drop your video here or browse files
-          from your computer.
-        </p>
-
-        {/* Browse Button */}
         <button
           type="button"
-          className="upload-button"
-          onClick={handleBrowse}
+          className="remove-button"
+          onClick={handleRemove}
           disabled={disabled}
+          title="Remove uploaded video"
+          aria-label="Remove uploaded video"
         >
-          <Video size={17} />
-          Browse Video
+          <Trash2 size={15} />
+          Remove
         </button>
-
-        {/* Hidden File Input */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          className="upload-input"
-          accept=".mp4,.avi,.mov,.mkv,.webm,video/*"
-          onChange={handleInputChange}
-          disabled={disabled}
-          aria-label="Select video file"
-        />
-
-        <span className="upload-hint">
-          Supported formats: MP4, AVI, MOV, MKV, WebM
-          <br />
-          Maximum file size: 500 MB
-        </span>
 
       </div>
 
-      {/* Selected File Information */}
-      {selectedFile && (
-        <div className="selected-file">
+      {/* Video Player */}
+      {videoUrl && (
+        <div className="video-preview-container">
 
-          <div className="file-information">
-
-            <div className="file-icon">
-              <FileVideo size={25} />
-            </div>
-
-            <div>
-              <div className="file-name">
-                {selectedFile.name}
-              </div>
-
-              <div className="file-size">
-                {formatFileSize(selectedFile.size)}
-              </div>
-            </div>
-
-          </div>
-
-          <div className="file-actions">
-
-            <CheckCircle
-              size={19}
-              color="#16a34a"
-              aria-label="File selected"
-            />
-
-            <button
-              type="button"
-              className="remove-button"
-              onClick={handleRemove}
-              disabled={disabled}
-              aria-label="Remove selected video"
-              title="Remove video"
+          {!videoError ? (
+            <video
+              key={videoUrl}
+              className="preview-video"
+              src={videoUrl}
+              controls
+              playsInline
+              preload="metadata"
+              onLoadedMetadata={handleMetadataLoaded}
+              onError={handleVideoError}
             >
-              <X size={15} />
-            </button>
+              Your browser does not support HTML5 video.
+            </video>
+          ) : (
+            <div className="video-preview-error">
+              <AlertCircle size={28} />
 
+              <p>{videoError}</p>
+            </div>
+          )}
+
+        </div>
+      )}
+
+      {/* Video Information */}
+      <div className="video-information-grid">
+
+        {/* File Name */}
+        <div className="video-info-item">
+
+          <div className="video-info-icon">
+            <FileVideo size={18} />
+          </div>
+
+          <div>
+            <span className="video-info-label">
+              File Name
+            </span>
+
+            <strong className="video-info-value">
+              {file.name}
+            </strong>
           </div>
 
         </div>
-      )}
 
-      {/* Validation Error */}
-      {error && (
-        <div
-          className="error-message upload-error"
-          role="alert"
-        >
-          <AlertCircle size={17} />
+        {/* File Size */}
+        <div className="video-info-item">
 
-          <p>{error}</p>
+          <div className="video-info-icon">
+            <HardDrive size={18} />
+          </div>
+
+          <div>
+            <span className="video-info-label">
+              File Size
+            </span>
+
+            <strong className="video-info-value">
+              {formatFileSize(file.size)}
+            </strong>
+          </div>
+
         </div>
-      )}
 
-      {/* Dragging Indicator */}
-      {isDragging && (
-        <div className="drag-overlay">
-          <Upload size={32} />
-          <strong>Drop your video here</strong>
+        {/* Duration */}
+        <div className="video-info-item">
+
+          <div className="video-info-icon">
+            <Clock size={18} />
+          </div>
+
+          <div>
+            <span className="video-info-label">
+              Duration
+            </span>
+
+            <strong className="video-info-value">
+              {duration === null
+                ? "Loading..."
+                : formatDuration(duration)}
+            </strong>
+          </div>
+
         </div>
-      )}
+
+        {/* Video Format */}
+        <div className="video-info-item">
+
+          <div className="video-info-icon">
+            <FileType size={18} />
+          </div>
+
+          <div>
+            <span className="video-info-label">
+              Format
+            </span>
+
+            <strong className="video-info-value">
+              {fileExtension}
+            </strong>
+          </div>
+
+        </div>
+
+      </div>
+
+      {/* Preview Information */}
+      <div className="preview-information">
+        <Video size={16} />
+
+        <span>
+          Your video is ready for AI-powered people detection and tracking.
+        </span>
+      </div>
 
     </section>
   );
 }
 
-export default VideoUpload;
+export default VideoPreview;
+
