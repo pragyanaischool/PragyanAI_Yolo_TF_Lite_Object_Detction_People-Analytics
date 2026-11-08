@@ -1,7 +1,7 @@
 
 services:
   - type: web
-    name: pragyanai-people-analytics-api
+    name: pragyanai-people-detection-api
     runtime: python
 
     rootDir: backend
@@ -10,18 +10,26 @@ services:
 
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
 
+    healthCheckPath: /health
+
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.10
 
-      - key: FRONTEND_ORIGIN
-        sync: false
-
       - key: MODEL_PATH
         value: models/yolo11n.tflite
+
+      - key: UPLOAD_DIR
+        value: /tmp/pragyanai_uploads
 
       - key: OUTPUT_DIR
         value: /tmp/pragyanai_outputs
 
-      - key: UPLOAD_DIR
-        value: /tmp/pragyanai_uploads
+      - key: MAX_UPLOAD_SIZE
+        value: "524288000"
+
+      - key: FRONTEND_ORIGIN
+        sync: false
+
+      - key: PUBLIC_API_URL
+        sync: false
