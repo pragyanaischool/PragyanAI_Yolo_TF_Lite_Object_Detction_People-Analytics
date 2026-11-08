@@ -1,5 +1,9 @@
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+} from "react";
 
 import {
   Activity,
@@ -14,7 +18,10 @@ import {
   WifiOff,
 } from "lucide-react";
 
-// Components
+// ============================================================
+// COMPONENTS
+// ============================================================
+
 import Header from "./components/Header";
 import VideoUpload from "./components/VideoUpload";
 import VideoPreview from "./components/VideoPreview";
@@ -24,7 +31,10 @@ import ResultsVideo from "./components/ResultsVideo";
 import AnalyticsCards from "./components/AnalyticsCards";
 import DownloadReport from "./components/DownloadReport";
 
-// API
+// ============================================================
+// API SERVICES
+// ============================================================
+
 import {
   healthCheck,
   processVideo,
@@ -41,8 +51,6 @@ const APP_CONFIG = {
   backend:
     "https://pragyanai-yolo-tf-lite-object-detction.onrender.com",
 
-  healthEndpoint: "/health",
-
   defaultConfidence: 0.35,
 
   defaultFrameInterval: 1,
@@ -52,14 +60,14 @@ const APP_CONFIG = {
 
 
 // ============================================================
-// APPLICATION
+// MAIN APPLICATION
 // ============================================================
 
 function App() {
 
-  // ----------------------------------------------------------
-  // 1. STATE
-  // ----------------------------------------------------------
+  // ==========================================================
+  // 1. APPLICATION STATE
+  // ==========================================================
 
   const [videoFile, setVideoFile] = useState(null);
 
@@ -73,9 +81,7 @@ function App() {
 
   const [isProcessing, setIsProcessing] = useState(false);
 
-  const [processingStatus, setProcessingStatus] = useState(
-    "idle"
-  );
+  const [processingStatus, setProcessingStatus] = useState("idle");
 
   const [processingProgress, setProcessingProgress] = useState(0);
 
@@ -83,9 +89,12 @@ function App() {
 
   const [results, setResults] = useState(null);
 
-  const [backendStatus, setBackendStatus] = useState(
-    "checking"
-  );
+
+  // ==========================================================
+  // 2. BACKEND AND MODEL STATUS
+  // ==========================================================
+
+  const [backendStatus, setBackendStatus] = useState("checking");
 
   const [modelLoaded, setModelLoaded] = useState(false);
 
@@ -93,10 +102,12 @@ function App() {
     "Checking backend connection..."
   );
 
+  const [modelError, setModelError] = useState(null);
 
-  // ----------------------------------------------------------
-  // 2. BACKEND HEALTH CHECK
-  // ----------------------------------------------------------
+
+  // ==========================================================
+  // 3. BACKEND HEALTH CHECK
+  // ==========================================================
 
   const checkBackend = useCallback(async () => {
 
@@ -108,48 +119,110 @@ function App() {
 
       const response = await healthCheck();
 
-      if (response.success) {
+      console.info(
+        "PragyanAI backend health response:",
+        response
+      );
+
+      /*
+       IMPORTANT FIX:
+
+       Current api.js returns:
+
+       {
+         connected: true,
+         model_loaded: true
+       }
+
+       Older versions may return:
+
+       {
+         success: true,
+         modelLoaded: true
+       }
+
+       Support both response formats.
+      */
+
+      const connected =
+        response?.connected === true ||
+        response?.success === true;
+
+      const loaded =
+        response?.model_loaded === true ||
+        response?.modelLoaded === true;
+
+      if (connected) {
 
         setBackendStatus("connected");
 
-        setModelLoaded(
-          response.modelLoaded === true
+        setModelLoaded(loaded);
+
+        setModelError(
+          response?.model_error || null
         );
 
         setBackendMessage(
-          response.modelLoaded
-            ? "Backend connected. Detection model loaded."
-            : "Backend connected, but detection model is not loaded."
+          loaded
+            ? "Backend connected. YOLO11 model loaded successfully."
+            : "Backend connected, but YOLO11 model is not ready."
         );
 
-      } else {
-
-        setBackendStatus("disconnected");
-
-        setModelLoaded(false);
-
-        setBackendMessage(
-          response.error || "Backend connection failed."
-        );
+        return {
+          connected: true,
+          model_loaded: loaded,
+        };
 
       }
-
-    } catch (err) {
 
       setBackendStatus("disconnected");
 
       setModelLoaded(false);
 
-      setBackendMessage(err.message);
+      setModelError(null);
+
+      setBackendMessage(
+        response?.message ||
+        response?.error ||
+        "Backend connection failed."
+      );
+
+      return {
+        connected: false,
+        model_loaded: false,
+      };
+
+    } catch (err) {
+
+      console.error(
+        "Backend health check failed:",
+        err
+      );
+
+      setBackendStatus("disconnected");
+
+      setModelLoaded(false);
+
+      setModelError(null);
+
+      setBackendMessage(
+        err.message ||
+        "Cannot connect to Render backend."
+      );
+
+      return {
+        connected: false,
+        model_loaded: false,
+      };
 
     }
 
   }, []);
 
 
-  // ----------------------------------------------------------
-  // 3. INITIAL BACKEND CHECK
-  // ----------------------------------------------------------
+  // ==========================================================
+  // 4. INITIAL BACKEND CONNECTION
+  // ==========================================================
 
   useEffect(() => {
 
@@ -158,9 +231,9 @@ function App() {
   }, [checkBackend]);
 
 
-  // ----------------------------------------------------------
-  // 4. FILE SELECTION
-  // ----------------------------------------------------------
+  // ==========================================================
+  // 5. FILE SELECTION
+  // ==========================================================
 
   const handleFileSelect = (file) => {
 
@@ -181,6 +254,8 @@ function App() {
       return;
     }
 
+    // Check browser File object
+
     if (!(file instanceof File)) {
 
       setVideoFile(null);
@@ -192,11 +267,15 @@ function App() {
       return;
     }
 
+    // Check file size
+
     if (file.size <= 0) {
 
       setVideoFile(null);
 
-      setError("The selected video file is empty.");
+      setError(
+        "The selected video file is empty."
+      );
 
       return;
     }
@@ -212,14 +291,45 @@ function App() {
       return;
     }
 
+    // Supported formats
+
+    const allowedExtensions = [
+      "mp4",
+      "avi",
+      "mov",
+      "mkv",
+      "webm",
+    ];
+
+    const extension = file.name
+      .split(".")
+      .pop()
+      .toLowerCase();
+
+    if (!allowedExtensions.includes(extension)) {
+
+      setVideoFile(null);
+
+      setError(
+        "Unsupported video format. Upload MP4, AVI, MOV, MKV or WEBM."
+      );
+
+      return;
+    }
+
     setVideoFile(file);
+
+    console.info(
+      "Video selected:",
+      file.name
+    );
 
   };
 
 
-  // ----------------------------------------------------------
-  // 5. RESET APPLICATION
-  // ----------------------------------------------------------
+  // ==========================================================
+  // 6. RESET APPLICATION
+  // ==========================================================
 
   const resetApplication = () => {
 
@@ -246,9 +356,9 @@ function App() {
   };
 
 
-  // ----------------------------------------------------------
-  // 6. PROCESSING FUNCTION
-  // ----------------------------------------------------------
+  // ==========================================================
+  // 7. PROCESS VIDEO
+  // ==========================================================
 
   const handleProcessVideo = async () => {
 
@@ -260,13 +370,15 @@ function App() {
 
     setProcessingProgress(0);
 
-    // ----------------------------------------
-    // Validate file
-    // ----------------------------------------
+    // --------------------------------------------------------
+    // Validate video
+    // --------------------------------------------------------
 
     if (!videoFile) {
 
-      setError("Please upload a video first.");
+      setError(
+        "Please upload a video first."
+      );
 
       return;
     }
@@ -274,24 +386,15 @@ function App() {
     if (!(videoFile instanceof File)) {
 
       setError(
-        "Invalid video file object. Please select the video again."
+        "Invalid video file. Please select the video again."
       );
 
       return;
     }
 
-    if (backendStatus === "disconnected") {
-
-      setError(
-        "Cannot connect to Render backend. Please check backend availability."
-      );
-
-      return;
-    }
-
-    // ----------------------------------------
-    // Start processing
-    // ----------------------------------------
+    // --------------------------------------------------------
+    // Set processing state
+    // --------------------------------------------------------
 
     setIsProcessing(true);
 
@@ -307,34 +410,84 @@ function App() {
         "PragyanAI People Detection Started"
       );
 
-      console.info("Video:", videoFile.name);
+      console.info(
+        "Video:",
+        videoFile.name
+      );
 
-      console.info("File size:", videoFile.size);
+      console.info(
+        "File size:",
+        videoFile.size
+      );
 
-      console.info("Confidence:", confidence);
+      console.info(
+        "Confidence:",
+        confidence
+      );
 
-      console.info("Frame interval:", frameInterval);
+      console.info(
+        "Frame interval:",
+        frameInterval
+      );
 
       console.info("================================");
 
-      // --------------------------------------
-      // API request
-      // --------------------------------------
+      // ------------------------------------------------------
+      // Recheck backend before processing
+      // ------------------------------------------------------
+
+      const backend = await checkBackend();
+
+      if (!backend.connected) {
+
+        throw new Error(
+          "Cannot connect to Render backend. Please check your connection."
+        );
+
+      }
+
+      if (!backend.model_loaded) {
+
+        throw new Error(
+          "YOLO11 model is not ready on Render. Please check the backend logs."
+        );
+
+      }
+
+      // ------------------------------------------------------
+      // Send video to FastAPI
+      // ------------------------------------------------------
 
       const result = await processVideo(
         videoFile,
         confidence,
-        frameInterval
+        frameInterval,
+        (progress) => {
+          setProcessingProgress(progress);
+        }
       );
 
-      // --------------------------------------
-      // Validate response
-      // --------------------------------------
+      console.info(
+        "Backend processing response:",
+        result
+      );
 
-      if (!result || result.success !== true) {
+      // ------------------------------------------------------
+      // Validate backend response
+      // ------------------------------------------------------
+
+      if (!result) {
 
         throw new Error(
-          result?.message ||
+          "No response received from the backend."
+        );
+
+      }
+
+      if (result.success !== true) {
+
+        throw new Error(
+          result.message ||
           "Video processing could not be completed."
         );
 
@@ -348,9 +501,9 @@ function App() {
 
       }
 
-      // --------------------------------------
-      // Store results
-      // --------------------------------------
+      // ------------------------------------------------------
+      // Store processing results
+      // ------------------------------------------------------
 
       setResults(result);
 
@@ -358,15 +511,17 @@ function App() {
 
       setProcessingStatus("completed");
 
+      setError("");
+
       console.info(
-        "PragyanAI processing completed",
+        "PragyanAI processing completed successfully.",
         result
       );
 
     } catch (err) {
 
       console.error(
-        "Processing failed:",
+        "Video processing failed:",
         err
       );
 
@@ -388,15 +543,17 @@ function App() {
   };
 
 
-  // ----------------------------------------------------------
-  // 7. RETRY PROCESSING
-  // ----------------------------------------------------------
+  // ==========================================================
+  // 8. RETRY PROCESSING
+  // ==========================================================
 
   const retryProcessing = () => {
 
     if (!videoFile) {
 
-      setError("Please upload a video first.");
+      setError(
+        "Please upload a video first."
+      );
 
       return;
     }
@@ -406,9 +563,9 @@ function App() {
   };
 
 
-  // ----------------------------------------------------------
-  // 8. STATUS LABELS
-  // ----------------------------------------------------------
+  // ==========================================================
+  // 9. DERIVED STATUS
+  // ==========================================================
 
   const isBackendConnected =
     backendStatus === "connected";
@@ -416,31 +573,40 @@ function App() {
   const isBackendReady =
     isBackendConnected && modelLoaded;
 
+  const modelStatusLabel =
+    backendStatus === "checking"
+      ? "Checking..."
+      : !isBackendConnected
+        ? "Unknown"
+        : modelLoaded
+          ? "Ready"
+          : "Not Ready";
 
-  // ----------------------------------------------------------
-  // 9. RENDER APPLICATION
-  // ----------------------------------------------------------
+
+  // ==========================================================
+  // 10. RENDER APPLICATION
+  // ==========================================================
 
   return (
 
     <div className="app-container">
 
-      {/* ================================================
+      {/* ==================================================
           HEADER
-      ================================================= */}
+      ================================================== */}
 
       <Header />
 
 
-      {/* ================================================
+      {/* ==================================================
           MAIN CONTENT
-      ================================================= */}
+      ================================================== */}
 
       <main className="main-content">
 
-        {/* --------------------------------------------
+        {/* ==================================================
             HERO SECTION
-        -------------------------------------------- */}
+        ================================================== */}
 
         <section className="hero-section">
 
@@ -471,9 +637,9 @@ function App() {
         </section>
 
 
-        {/* --------------------------------------------
-            BACKEND STATUS
-        -------------------------------------------- */}
+        {/* ==================================================
+            BACKEND STATUS SECTION
+        ================================================== */}
 
         <section className="backend-status-section">
 
@@ -482,9 +648,7 @@ function App() {
             <div className="backend-status-left">
 
               <div
-                className={`backend-status-icon ${
-                  backendStatus
-                }`}
+                className={`backend-status-icon ${backendStatus}`}
               >
 
                 {isBackendConnected ? (
@@ -509,16 +673,14 @@ function App() {
             <div className="backend-status-right">
 
               <span
-                className={`backend-status-badge ${
-                  backendStatus
-                }`}
+                className={`backend-status-badge ${backendStatus}`}
               >
 
                 {backendStatus === "checking"
                   ? "Checking"
                   : isBackendConnected
-                  ? "Connected"
-                  : "Disconnected"}
+                    ? "Connected"
+                    : "Disconnected"}
 
               </span>
 
@@ -530,7 +692,14 @@ function App() {
                 title="Refresh backend status"
               >
 
-                <RefreshCw size={17} />
+                <RefreshCw
+                  size={17}
+                  className={
+                    backendStatus === "checking"
+                      ? "spin"
+                      : ""
+                  }
+                />
 
               </button>
 
@@ -539,9 +708,11 @@ function App() {
           </div>
 
 
-          {/* Engine information */}
+          {/* ENGINE INFORMATION */}
 
           <div className="engine-status-grid">
+
+            {/* Detection engine */}
 
             <div className="engine-status-item">
 
@@ -558,6 +729,8 @@ function App() {
             </div>
 
 
+            {/* Tracking engine */}
+
             <div className="engine-status-item">
 
               <Activity size={18} />
@@ -572,6 +745,8 @@ function App() {
 
             </div>
 
+
+            {/* Video processing */}
 
             <div className="engine-status-item">
 
@@ -588,6 +763,8 @@ function App() {
             </div>
 
 
+            {/* Model status */}
+
             <div className="engine-status-item">
 
               {isBackendReady ? (
@@ -600,11 +777,7 @@ function App() {
 
                 <span>Model Status</span>
 
-                <strong>
-                  {modelLoaded
-                    ? "Loaded"
-                    : "Not Ready"}
-                </strong>
+                <strong>{modelStatusLabel}</strong>
 
               </div>
 
@@ -615,9 +788,9 @@ function App() {
         </section>
 
 
-        {/* ================================================
-            PROCESSING WORKSPACE
-        ================================================= */}
+        {/* ==================================================
+            VIDEO PROCESSING WORKSPACE
+        ================================================== */}
 
         <section className="workspace-section">
 
@@ -652,9 +825,9 @@ function App() {
 
           <div className="workspace-grid">
 
-            {/* --------------------------------------
+            {/* ==================================================
                 LEFT COLUMN
-            -------------------------------------- */}
+            ================================================== */}
 
             <div className="workspace-left">
 
@@ -693,7 +866,7 @@ function App() {
               />
 
 
-              {/* PROCESS BUTTON */}
+              {/* PROCESS VIDEO BUTTON */}
 
               <button
                 type="button"
@@ -733,7 +906,7 @@ function App() {
               </button>
 
 
-              {/* BACKEND NOT READY */}
+              {/* BACKEND WARNING */}
 
               {!isBackendReady && (
 
@@ -742,11 +915,30 @@ function App() {
                   <AlertCircle size={17} />
 
                   <span>
+
                     {backendStatus === "checking"
                       ? "Checking backend connection..."
-                      : backendStatus === "disconnected"
-                      ? "Backend is unavailable. Please retry connection."
-                      : "Detection model is not loaded on Render."}
+                      : !isBackendConnected
+                        ? "Backend is unavailable. Please check Render and retry connection."
+                        : "YOLO11 detection model is not ready on Render."}
+
+                  </span>
+
+                </div>
+
+              )}
+
+
+              {/* MODEL ERROR */}
+
+              {isBackendConnected && modelError && (
+
+                <div className="backend-warning">
+
+                  <AlertCircle size={17} />
+
+                  <span>
+                    Model error: {modelError}
                   </span>
 
                 </div>
@@ -756,9 +948,9 @@ function App() {
             </div>
 
 
-            {/* --------------------------------------
+            {/* ==================================================
                 RIGHT COLUMN
-            -------------------------------------- */}
+            ================================================== */}
 
             <div className="workspace-right">
 
@@ -768,7 +960,8 @@ function App() {
                 error={error}
               />
 
-              {/* ERROR MESSAGE */}
+
+              {/* PROCESSING ERROR */}
 
               {error && (
 
@@ -789,7 +982,7 @@ function App() {
               )}
 
 
-              {/* SUCCESS MESSAGE */}
+              {/* PROCESSING SUCCESS */}
 
               {processingStatus === "completed" && (
 
@@ -811,6 +1004,26 @@ function App() {
 
               )}
 
+
+              {/* RETRY BUTTON */}
+
+              {processingStatus === "failed" && videoFile && (
+
+                <button
+                  type="button"
+                  className="process-button"
+                  onClick={retryProcessing}
+                  disabled={isProcessing}
+                >
+
+                  <RefreshCw size={18} />
+
+                  Retry Processing
+
+                </button>
+
+              )}
+
             </div>
 
           </div>
@@ -818,9 +1031,9 @@ function App() {
         </section>
 
 
-        {/* ================================================
-            RESULTS SECTION
-        ================================================= */}
+        {/* ==================================================
+            PROCESSING RESULTS
+        ================================================== */}
 
         {results && (
 
@@ -872,7 +1085,7 @@ function App() {
             />
 
 
-            {/* DOWNLOADS */}
+            {/* DOWNLOAD REPORTS */}
 
             <DownloadReport
               videoUrl={results.video_url}
@@ -890,9 +1103,9 @@ function App() {
         )}
 
 
-        {/* ================================================
-            WORKFLOW INFORMATION
-        ================================================= */}
+        {/* ==================================================
+            HOW IT WORKS
+        ================================================== */}
 
         <section className="workflow-section">
 
@@ -908,6 +1121,8 @@ function App() {
 
 
           <div className="workflow-grid">
+
+            {/* STEP 1 */}
 
             <div className="workflow-card">
 
@@ -925,6 +1140,8 @@ function App() {
 
             </div>
 
+
+            {/* STEP 2 */}
 
             <div className="workflow-card">
 
@@ -945,6 +1162,8 @@ function App() {
             </div>
 
 
+            {/* STEP 3 */}
+
             <div className="workflow-card">
 
               <div className="workflow-number">
@@ -961,6 +1180,8 @@ function App() {
 
             </div>
 
+
+            {/* STEP 4 */}
 
             <div className="workflow-card">
 
@@ -985,9 +1206,9 @@ function App() {
       </main>
 
 
-      {/* ================================================
+      {/* ==================================================
           FOOTER
-      ================================================= */}
+      ================================================== */}
 
       <footer className="app-footer">
 
@@ -1019,6 +1240,7 @@ function App() {
     </div>
 
   );
+
 }
 
 
