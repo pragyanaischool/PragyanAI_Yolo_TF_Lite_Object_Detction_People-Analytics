@@ -1,8 +1,12 @@
 
 /*
- * PragyanAI People Detection & Counting - API client
- * FastAPI backend: Render
- * Frontend: React + Vite / Netlify
+ * PragyanAI People Detection & Counting
+ * API Client
+ *
+ * Frontend: React + Vite + Netlify
+ * Backend: FastAPI + Render
+ * Detection: YOLO11 TFLite
+ * Tracking: ByteTrack
  */
 
 // =========================================================
@@ -21,13 +25,24 @@ const API_URL = `${API_BASE_URL}/api`;
 export const API_CONFIG = {
   BASE_URL: API_BASE_URL,
   API_URL,
+
   HEALTH_URL: `${API_BASE_URL}/health`,
   MODEL_INFO_URL: `${API_URL}/model-info`,
   JOBS_URL: `${API_URL}/jobs`,
   OUTPUTS_URL: `${API_URL}/outputs`,
+
   MAX_UPLOAD_SIZE: 500 * 1024 * 1024,
-  ALLOWED_EXTENSIONS: ["mp4", "avi", "mov", "mkv", "webm"],
+
+  ALLOWED_EXTENSIONS: [
+    "mp4",
+    "avi",
+    "mov",
+    "mkv",
+    "webm",
+  ],
+
   POLL_INTERVAL_MS: 3000,
+
   MAX_JOB_WAIT_MS: 3 * 60 * 60 * 1000,
 };
 
@@ -36,7 +51,8 @@ export const API_CONFIG = {
 // =========================================================
 
 export const parseResponse = async (response) => {
-  const contentType = response.headers.get("content-type") || "";
+  const contentType =
+    response.headers.get("content-type") || "";
 
   let data;
 
@@ -49,7 +65,8 @@ export const parseResponse = async (response) => {
   }
 
   if (!response.ok) {
-    let message = `Request failed with HTTP ${response.status}`;
+    let message =
+      `Request failed with HTTP ${response.status}`;
 
     if (typeof data === "string" && data) {
       message = data;
@@ -62,6 +79,7 @@ export const parseResponse = async (response) => {
     }
 
     const error = new Error(message);
+
     error.status = response.status;
     error.response = data;
 
@@ -81,17 +99,20 @@ const request = async (url, options = {}) => {
   try {
     response = await fetch(url, {
       ...options,
+
       headers: {
         Accept: "application/json",
         ...(options.headers || {}),
       },
     });
+
   } catch (error) {
     const wrapped = new Error(
       `Unable to connect to the PragyanAI backend: ${error.message}`
     );
 
     wrapped.cause = error;
+
     throw wrapped;
   }
 
@@ -119,11 +140,13 @@ export const healthCheck = async () => {
       data?.status === "degraded" ||
       data?.status === "ok";
 
-    const modelLoaded = data?.model_loaded === true;
+    const modelLoaded =
+      data?.model_loaded === true;
 
     return {
       connected,
       checking: false,
+
       model_loaded: modelLoaded,
 
       model_status:
@@ -131,10 +154,13 @@ export const healthCheck = async () => {
         (modelLoaded ? "ready" : "not_ready"),
 
       status: data?.status || "unknown",
+
       api: data?.api || null,
 
       model_exists: data?.model_exists ?? null,
+
       model_path: data?.model_path || null,
+
       model_error: data?.model_error || null,
 
       detection_engine:
@@ -159,10 +185,13 @@ export const healthCheck = async () => {
     return {
       connected: false,
       checking: false,
+
       model_loaded: false,
       model_status: "unknown",
+
       status: "disconnected",
       api: null,
+
       model_exists: null,
       model_path: null,
       model_error: error.message,
@@ -206,7 +235,9 @@ export const validateVideoFile = (file) => {
     .pop()
     .toLowerCase();
 
-  if (!API_CONFIG.ALLOWED_EXTENSIONS.includes(extension)) {
+  if (
+    !API_CONFIG.ALLOWED_EXTENSIONS.includes(extension)
+  ) {
     throw new Error(
       "Unsupported video format. Upload MP4, AVI, MOV, MKV or WEBM."
     );
@@ -226,9 +257,11 @@ export const validateVideoFile = (file) => {
     valid: true,
     filename: file.name,
     size: file.size,
+
     size_mb: Number(
       (file.size / (1024 * 1024)).toFixed(2)
     ),
+
     extension,
   };
 };
@@ -270,10 +303,12 @@ export const createVideoJob = async (
   const formData = new FormData();
 
   formData.append("file", file);
+
   formData.append(
     "confidence",
     String(confidenceValue)
   );
+
   formData.append(
     "frame_interval",
     String(intervalValue)
@@ -344,9 +379,13 @@ export const pollVideoJob = async (
   {
     onUpdate,
     onProgress,
+
     pollIntervalMs = API_CONFIG.POLL_INTERVAL_MS,
+
     maxWaitMs = API_CONFIG.MAX_JOB_WAIT_MS,
+
     signal,
+
     maxConsecutiveErrors = 12,
   } = {}
 ) => {
@@ -355,9 +394,11 @@ export const pollVideoJob = async (
   }
 
   const startedAt = Date.now();
+
   let errors = 0;
 
   while (Date.now() - startedAt < maxWaitMs) {
+
     if (signal?.aborted) {
       throw new DOMException(
         "Polling cancelled.",
@@ -402,6 +443,7 @@ export const pollVideoJob = async (
       }
 
     } catch (error) {
+
       if (error.name === "AbortError") {
         throw error;
       }
@@ -568,23 +610,32 @@ export const deleteOutputFile = (filename) =>
 
 const api = {
   API_CONFIG,
+
   parseResponse,
+
   healthCheck,
   getBackendStatus,
   getModelInfo,
+
   validateVideoFile,
   createVideoJob,
+
   getJobStatus,
   getJobAnalytics,
   getProcessingResults,
+
   pollVideoJob,
+
   getFileUrl,
   downloadFile,
+
   downloadProcessedVideo,
   downloadCSVReport,
   downloadJSONReport,
+
   getOutputFiles,
   deleteOutputFile,
 };
 
 export default api;
+
