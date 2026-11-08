@@ -1,38 +1,39 @@
 
-"""
-PragyanAI People Detection & Counting
-
-Backend Utilities Package
-
-Modules:
-    video_utils.py
-        Video metadata, validation and frame utilities.
-
-    file_utils.py
-        File handling, upload validation and output management.
-"""
-
 from .video_utils import (
-    get_video_metadata,
+    SUPPORTED_VIDEO_EXTENSIONS,
+    ALLOWED_EXTENSIONS,
+    VideoValidationError,
     validate_video,
-    extract_video_frames
-)
-
-from .file_utils import (
-    create_directory,
-    generate_unique_filename,
-    save_uploaded_file,
-    delete_file,
-    get_file_size
+    get_video_metadata,
+    get_video_info,
+    get_video_duration,
+    get_video_fps,
+    get_video_resolution,
+    extract_video_frames,
+    extract_frames,
+    save_frame,
+    extract_and_save_frames,
+    check_video_integrity,
+    resize_frame,
+    get_video_summary,
 )
 
 __all__ = [
-    "get_video_metadata",
+    "SUPPORTED_VIDEO_EXTENSIONS",
+    "ALLOWED_EXTENSIONS",
+    "VideoValidationError",
     "validate_video",
+    "get_video_metadata",
+    "get_video_info",
+    "get_video_duration",
+    "get_video_fps",
+    "get_video_resolution",
     "extract_video_frames",
-    "create_directory",
-    "generate_unique_filename",
-    "save_uploaded_file",
-    "delete_file",
-    "get_file_size"
+    "extract_frames",
+    "save_frame",
+    "extract_and_save_frames",
+    "check_video_integrity",
+    "resize_frame",
+    "get_video_summary",
 ]
+
